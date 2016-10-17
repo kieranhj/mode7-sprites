@@ -78,6 +78,10 @@ GUARD &A0
 .plot_diff_x			SKIP 1
 .plot_diff_y			SKIP 1
 
+.mirror_byte			SKIP 1
+.mirror_bit				SKIP 1
+
+
 \ ******************************************************************
 \ *	Start address to be saved
 \ ******************************************************************
@@ -161,6 +165,8 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	STA plot_ptr+1
 
 	JSR mode7_plot_sprite
+
+	JSR mode7_mirror_fx
 
 	JMP loop
 
@@ -513,6 +519,109 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	
 	JMP y_loop
 	.done
+
+	.return
+	RTS
+}
+
+\ ******************************************************************
+\ *	Mirror fn
+\ ******************************************************************
+
+MIRROR_bottom_row = 24
+MIRROR_top_row = 22
+MIRROR_read_row = MIRROR_top_row - 1
+
+MIRROR_read_row0_addr = (MODE7_base_addr + ((MIRROR_read_row-0) * MODE7_char_width))
+MIRROR_read_row1_addr = (MODE7_base_addr + ((MIRROR_read_row-1) * MODE7_char_width))
+MIRROR_read_row2_addr = (MODE7_base_addr + ((MIRROR_read_row-2) * MODE7_char_width))
+MIRROR_read_row3_addr = (MODE7_base_addr + ((MIRROR_read_row-3) * MODE7_char_width))
+MIRROR_read_row4_addr = (MODE7_base_addr + ((MIRROR_read_row-4) * MODE7_char_width))
+MIRROR_read_row5_addr = (MODE7_base_addr + ((MIRROR_read_row-5) * MODE7_char_width))
+MIRROR_read_row6_addr = (MODE7_base_addr + ((MIRROR_read_row-6) * MODE7_char_width))
+MIRROR_read_row7_addr = (MODE7_base_addr + ((MIRROR_read_row-7) * MODE7_char_width))
+MIRROR_read_row8_addr = (MODE7_base_addr + ((MIRROR_read_row-8) * MODE7_char_width))
+
+MIRROR_write_row0_addr = (MODE7_base_addr + ((MIRROR_top_row+0) * MODE7_char_width))
+MIRROR_write_row1_addr = (MODE7_base_addr + ((MIRROR_top_row+1) * MODE7_char_width))
+MIRROR_write_row2_addr = (MODE7_base_addr + ((MIRROR_top_row+2) * MODE7_char_width))
+
+.mode7_mirror_fx
+{
+	LDX #PLOT_origin_col
+	.loop0
+	LDA MIRROR_read_row0_addr,X
+	AND #&3
+	STA mirror_byte
+	LDA MIRROR_read_row1_addr,X
+	AND #&3
+	ASL A: ASL A				; bits 0&1 become 2&3
+	ORA mirror_byte
+	STA mirror_byte
+	LDA MIRROR_read_row2_addr,X
+	AND #&3
+	ASL A: ASL A
+	ASL A: ASL A				; bits 0&1 become 4&5
+	STA mirror_bit
+	AND #&20					; take bit 5 and make it bit 6
+	ASL A
+	ORA #&20
+	ORA mirror_bit
+	ORA mirror_byte
+	STA MIRROR_write_row0_addr,X
+	INX
+	CPX #MODE7_char_width
+	BCC loop0
+
+	LDX #PLOT_origin_col
+	.loop1
+	LDA MIRROR_read_row3_addr,X
+	AND #&3
+	STA mirror_byte
+	LDA MIRROR_read_row4_addr,X
+	AND #&3
+	ASL A: ASL A				; bits 0&1 become 2&3
+	ORA mirror_byte
+	STA mirror_byte
+	LDA MIRROR_read_row5_addr,X
+	AND #&3
+	ASL A: ASL A
+	ASL A: ASL A				; bits 0&1 become 4&5
+	STA mirror_bit
+	AND #&20					; take bit 5 and make it bit 6
+	ASL A
+	ORA #&20
+	ORA mirror_bit
+	ORA mirror_byte
+	STA MIRROR_write_row1_addr,X
+	INX
+	CPX #MODE7_char_width
+	BCC loop1
+
+	LDX #PLOT_origin_col
+	.loop2
+	LDA MIRROR_read_row6_addr,X
+	AND #&3
+	STA mirror_byte
+	LDA MIRROR_read_row7_addr,X
+	AND #&3
+	ASL A: ASL A				; bits 0&1 become 2&3
+	ORA mirror_byte
+	STA mirror_byte
+	LDA MIRROR_read_row8_addr,X
+	AND #&3
+	ASL A: ASL A
+	ASL A: ASL A				; bits 0&1 become 4&5
+	STA mirror_bit
+	AND #&20					; take bit 5 and make it bit 6
+	ASL A
+	ORA #&20
+	ORA mirror_bit
+	ORA mirror_byte
+	STA MIRROR_write_row2_addr,X
+	INX
+	CPX #MODE7_char_width
+	BCC loop2
 
 	.return
 	RTS
