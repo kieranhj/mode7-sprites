@@ -231,7 +231,7 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 \ * X coordinate, Y coordinate = plot_x, plot_y
 \ ******************************************************************
 
-.mode7_plot_sprite
+.mode7_clip_sprite
 {
 	\\ Zero any temporary variables
 	LDY #0
@@ -270,7 +270,8 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	BPL visible_left				; w - x < 0 so plot position is off screen
 
 	.jump_not_visible
-	JMP not_visible					; stupid branch range
+	SEC
+	RTS
 	
 	.visible_left
 	STA plot_char_w
@@ -304,7 +305,6 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 
 	\\ Look up y coordinate
 	LDY plot_y
-
 	LDA mod3_table, Y
 	STA plot_y_offset
 
@@ -354,6 +354,57 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 
 	.no_clip_bottom
 
+	.return
+	CLC
+	RTS
+}
+
+.mode7_noclip_sprite
+{
+	\\ Zero any temporary variables
+	LDY #0
+	STY plot_diff_x
+	STY plot_diff_y
+
+	\\ Copy width and height in chars (bytes)
+	LDA (plot_ptr),Y
+	STA plot_char_w
+	STA plot_char_pitch				; store pitch
+	INY
+	LDA (plot_ptr),Y
+	STA plot_char_h
+
+	\\ Calculate x,y offset from coordinates
+	LDA plot_x
+	AND #1
+	STA plot_x_offset
+
+	LDA plot_x
+	LSR A							; relative
+	CLC
+	ADC #PLOT_origin_col			; make absolute
+	STA plot_char_x
+
+	\\ Look up y coordinate
+	LDY plot_y
+	LDA mod3_table, Y
+	STA plot_y_offset
+
+	LDA div3_table, Y
+	STA plot_char_y
+
+	.return
+	RTS
+}
+
+.mode7_plot_sprite
+{
+	\\ Calculate plotting vars with clipping
+	JSR mode7_clip_sprite
+	BCC do_plot
+	RTS
+
+	.do_plot
 	\\ Calculate screen address from coordinates
 	LDY plot_char_y
 
@@ -454,32 +505,19 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 
 .mode7_erase_sprite
 {
-	\\ Copy width and height in chars (bytes)
-	LDY #0
-	LDA (plot_ptr),Y
-	STA plot_char_w
-	INY
-	LDA (plot_ptr),Y
-	STA plot_char_h
+	\\ Calculate plotting vars with clipping
+	JSR mode7_clip_sprite
+	BCS return
 
 	\\ Calculate screen address from coordinates
+	LDY plot_char_y
 
-	\\ Look up address of row from y coordiante
-	LDY plot_y
-	LDA mode7_texel_y_to_row_addr_LO,Y
-	STA writeptr
-	LDA mode7_texel_y_to_row_addr_HI,Y
-	STA writeptr+1
-	
-	\\ Divide x coordinate by 2 for colum
-	LDA plot_x
-	LSR A							; x offset in carry
-
-	\\ Add column to writeptr
+	\\ Look up address of row from y coordinates
 	CLC
-	ADC writeptr
+	LDA mode7_row_addr_LO,Y
+	ADC plot_char_x
 	STA store_screen_addr+1			; ** MODIFIES CODE
-	LDA writeptr+1
+	LDA mode7_row_addr_HI,Y
 	ADC #0
 	STA store_screen_addr+2			; ** MODIFIES CODE
 
@@ -490,17 +528,19 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	.y_loop
 
 	\\ Plot all chars
-	LDX #0
 	LDA #0
+	LDX #0
 	.x_loop
+	CPX plot_char_w
+	BCS done_x_loop
 	.store_screen_addr
 	STA &7C00,X						; ** SELF-MODIFIED CODE
 	INX
-	CPX plot_char_w
-	BNE x_loop
+	JMP x_loop
 
+	.done_x_loop
 	DEY
-	BEQ done
+	BEQ done_y_loop
 
 	\\ Next line
 	CLC
@@ -512,7 +552,7 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	STA store_screen_addr+2
 	
 	JMP y_loop
-	.done
+	.done_y_loop
 
 	.return
 	RTS
