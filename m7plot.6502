@@ -1,0 +1,582 @@
+\ ******************************************************************
+\ * TeleTexel v1
+\ * Music visualiser in MODE 7
+\ * Treat MODE 7 as a 76 x 75 pixel canvas (aka teletexels)
+\ ******************************************************************
+
+
+\ ******************************************************************
+\ *	Define OS entries (could be INCLUDE bbc_os.h)
+\ ******************************************************************
+
+oswrch = &FFEE
+osasci = &FFE3
+osbyte = &FFF4
+osword = &FFF1
+EVENTV = &0220
+
+INKEY_esc = 112
+INKEY_w = 33
+INKEY_s = 81
+INKEY_a = 65
+INKEY_d = 50
+
+SEI_OP = $78
+CLI_OP = $58
+NOP_OP = $ea
+
+\ ******************************************************************
+\ *	Define debug flags (prefer DEBUG_* naming?)
+\ ******************************************************************
+
+
+\ ******************************************************************
+\ *	Define macros (prefer MACRO_* naming?)
+\ ******************************************************************
+
+\ ******************************************************************
+\ *	Define global constants
+\ ******************************************************************
+
+MODE7_base_addr = &7C00
+MODE7_char_width = 40
+MODE7_char_height = 25
+
+MODE7_alpha_black = 128
+MODE7_graphic_black = 144
+MODE7_contiguous = 153
+MODE7_separated = 154
+
+PLOT_origin_col = 4				; skip first 4 coloumns (col + newbg + col + sep)
+MODE7_texel_width = (MODE7_char_width - PLOT_origin_col) * 2
+MODE7_texel_height = MODE7_char_height * 3
+
+
+\ ******************************************************************
+\ *	Define fast (zero page) runtime variables
+\ ******************************************************************
+
+ORG &7B
+GUARD &A0
+
+.writeptr				SKIP 2
+.readptr				SKIP 2
+
+.test_x					SKIP 1
+.test_y					SKIP 1
+
+.plot_ptr				SKIP 2			; ptr to sprite data
+.plot_x					SKIP 1			; x coordinate in pixels
+.plot_y					SKIP 1			; y coordinate in pixels
+.plot_char_w			SKIP 1			; sprite width in chars
+.plot_char_h			SKIP 1			; sprite width in chars
+.plot_x_offset			SKIP 1			; sprite offset x
+.plot_y_offset			SKIP 1			; sprite offset y
+.plot_char_x			SKIP 1			; x position in chars absolute
+.plot_char_y			SKIP 1			; y position in chars absolute
+.plot_char_pitch		SKIP 1			; pitch of sprite data in chars
+.plot_diff_x			SKIP 1
+.plot_diff_y			SKIP 1
+
+\ ******************************************************************
+\ *	Start address to be saved
+\ ******************************************************************
+
+ORG &1900	      					; code origin (like P%=&2000)
+GUARD &7C00							; ensure code size doesn't hit start of screen memory
+
+.start
+
+\ ******************************************************************
+\ *	Code entry
+\ ******************************************************************
+
+\ ******************************************************************
+\ *	Main loop sequencing tick & draw code
+\ ******************************************************************
+
+.main
+{
+	\\ Set MODE 7 for memory
+	LDA #22: JSR oswrch
+	LDA #7: JSR oswrch
+	\\ Turn off cursor!
+
+	JSR teletexel_init
+
+	LDA #0
+	STA test_x
+	STA test_y
+
+	.loop
+
+	\\ Wait for vsync
+	LDA #19
+	JSR osbyte
+
+	LDA test_x
+	STA plot_x
+	LDA test_y
+	STA plot_y
+	LDA #LO(starhole)
+	STA plot_ptr
+	LDA #HI(starhole)
+	STA plot_ptr+1
+
+;	JSR mode7_erase_sprite
+
+	\\ Check for Escape key
+	{
+		LDA #121
+		LDX #0
+		JSR osbyte
+		CPX #INKEY_esc
+		BEQ exit
+
+		CPX #INKEY_w
+		BNE not_w
+		DEC test_y
+		.not_w
+		CPX #INKEY_s
+		BNE not_s
+		INC test_y
+		.not_s
+		CPX #INKEY_a
+		BNE not_a
+		DEC test_x
+		.not_a
+		CPX #INKEY_d
+		BNE not_d
+		INC test_x
+		.not_d
+	}
+
+	LDA test_x
+	STA plot_x
+	LDA test_y
+	STA plot_y
+	LDA #LO(starhole)
+	STA plot_ptr
+	LDA #HI(starhole)
+	STA plot_ptr+1
+
+	JSR mode7_plot_sprite
+
+	JMP loop
+
+	\\ Until we finish
+	.exit
+
+	RTS
+}
+
+.teletexel_init
+{
+	LDX #MODE7_contiguous
+	LDY #MODE7_char_height - 1
+
+	.loop
+	TYA:PHA
+	LDA #MODE7_graphic_black + 7
+	JSR teletexel_set_row_start
+	PLA:TAY
+	DEY
+	BPL loop
+
+	.return
+	RTS
+}
+
+.teletexel_set_row_start			; set row Y to char A, X
+{
+	PHA
+	LDA mode7_row_addr_LO,Y
+	STA writeptr
+	LDA mode7_row_addr_HI,Y
+	STA writeptr+1
+
+	LDY #0
+	PLA
+	STA (writeptr),Y
+	TXA:INY
+	STA (writeptr),Y
+
+	.return
+	RTS
+}
+
+.teletexel_erase_row				; row Y
+{
+	LDA mode7_row_addr_LO,Y
+	STA writeptr
+	LDA mode7_row_addr_HI,Y
+	STA writeptr+1
+
+	LDA #32
+	LDY #39
+	.loop
+	STA (writeptr),Y
+	DEY
+	CPY #1
+	BNE loop
+
+	.return
+	RTS	
+}
+
+\ ******************************************************************
+\ *	Sprite plot routine
+\ * Want the interface to be something like:
+\ * Sprite data address = plot_ptr
+\ * X coordinate, Y coordinate = plot_x, plot_y
+\ ******************************************************************
+
+.mode7_plot_sprite
+{
+	\\ Zero any temporary variables
+	LDY #0
+	STY plot_diff_x
+	STY plot_diff_y
+
+	\\ Copy width and height in chars (bytes)
+	LDA (plot_ptr),Y
+	STA plot_char_w
+	STA plot_char_pitch				; store pitch
+	INY
+	LDA (plot_ptr),Y
+	STA plot_char_h
+
+	\\ Calculate x,y offset from coordinates
+	LDA plot_x
+	AND #1
+	STA plot_x_offset
+
+	\\ Calculate absolute x,y character pos from coordinates
+	LDA plot_x
+	BPL no_clip_left
+
+	\\ x < 0
+	\\ Make positive
+	EOR #&FF						; flip bits + 1
+	CLC
+	ADC #2							; add 1 as as need to correctly round to chars
+	LSR A							; div 2
+	STA plot_diff_x					; this is the diff to clip in chars
+
+	\\ Reduce width by diff			
+	SEC
+	LDA plot_char_w
+	SBC plot_diff_x					; could just add this
+	BPL visible_left				; w - x < 0 so plot position is off screen
+
+	.jump_not_visible
+	JMP not_visible					; stupid branch range
+	
+	.visible_left
+	STA plot_char_w
+
+	\\ Reset x
+	LDA #0							; x=0
+
+	.no_clip_left
+	LSR A							; relative
+	CLC
+	ADC #PLOT_origin_col			; make absolute
+	STA plot_char_x
+
+	\\ Check if not visible
+	CMP #MODE7_char_width
+	BCS jump_not_visible			; x > 40 so plot position is off screen
+
+	\\ Now test for right clip by adding width
+	CLC
+	ADC plot_char_w
+	CMP #MODE7_char_width
+	BCC no_clip_right
+
+	\\ Is over width of screen
+	; Carry set
+	LDA #MODE7_char_width
+	SBC plot_char_x
+	STA plot_char_w					; clip width = 40 - x
+
+	.no_clip_right
+
+	\\ Look up y coordinate
+	LDY plot_y
+
+	LDA mod3_table, Y
+	STA plot_y_offset
+
+	\\ y < 0?
+	TYA
+	BPL no_clip_top
+
+	\\ Make positive
+
+	EOR #&FF					; flip the bits +1 then -1
+	TAY
+
+	CLC
+	LDA div3_table, Y			; char row = y DIV 3
+	ADC #1						; when negative need one more char row`
+	STA plot_diff_y
+
+	SEC
+	LDA plot_char_h
+	SBC plot_diff_y				; subtract clipped character rows from height
+	STA plot_char_h
+
+	BEQ jump_not_visible		; if h <= 0 then not visible
+	BMI jump_not_visible
+
+	LDY #0
+
+	.no_clip_top
+	LDA div3_table, Y
+	STA plot_char_y
+
+	\\ Check if not visible off bottom
+	CMP #MODE7_char_height
+	BCS jump_not_visible			; y > 25 so plot position is off screen
+
+	\\ Now test for bottom clip by adding height
+	CLC
+	ADC plot_char_h
+	CMP #MODE7_char_height
+	BCC no_clip_bottom
+
+	\\ Is over height of screen
+	; Carry set
+	LDA #MODE7_char_height
+	SBC plot_char_y
+	STA plot_char_h					; clip height = 25 - y
+
+	.no_clip_bottom
+
+	\\ Calculate screen address from coordinates
+	LDY plot_char_y
+
+	\\ Look up address of row from y coordinates
+	CLC
+	LDA mode7_row_addr_LO,Y
+	ADC plot_char_x
+	STA store_screen_addr+1			; ** MODIFIES CODE
+	LDA mode7_row_addr_HI,Y
+	ADC #0
+	STA store_screen_addr+2			; ** MODIFIES CODE
+
+	\\ Locate sprite data = x_offset*6 + y_offset*2 - ick
+	CLC
+	LDA plot_x_offset
+	BEQ x_offset_zero
+	LDA #6							; 3x y offsets * 2x bytes
+	.x_offset_zero
+	ADC plot_y_offset
+	ADC plot_y_offset
+	ADC #2							; skip w & h bytes
+
+	TAY
+
+	\\ Then read off the data address LO & HI - mmph
+	CLC
+	LDA (plot_ptr),Y
+	ADC plot_diff_x					; offset into sprite data for clip
+	STA load_sprite_data+1
+	INY
+	LDA (plot_ptr),Y
+	STA load_sprite_data+2
+
+	\\ If we're clipped off the top we need to start from inside the sprite data
+	{
+		LDY plot_diff_y
+		.loop
+		BEQ done
+		CLC
+		LDA load_sprite_data+1
+		ADC plot_char_pitch
+		STA load_sprite_data+1
+		LDA load_sprite_data+2
+		ADC #0
+		STA load_sprite_data+2
+		DEY
+		BNE loop
+		.done
+	}
+
+	\\ Plot loop
+
+	\\ For each row
+	LDY plot_char_h
+	.y_loop
+
+	\\ Plot all chars
+	LDX #0							; start at left clip
+	.x_loop
+	CPX plot_char_w
+	BCS done_x_loop
+	.load_sprite_data
+	LDA end,X						; ** SELF-MODIFIED CODE
+	.store_screen_addr
+	STA &7C00,X						; ** SELF-MODIFIED CODE
+	INX
+	JMP x_loop
+
+	.done_x_loop
+	DEY
+	BEQ done_y_loop
+
+	\\ Next line
+	CLC
+	LDA store_screen_addr+1
+	ADC #MODE7_char_width			; screen pitch
+	STA store_screen_addr+1
+	LDA store_screen_addr+2
+	ADC #0
+	STA store_screen_addr+2
+	
+	\\ Next data - gah this is continuous
+	CLC
+	LDA load_sprite_data+1
+	ADC plot_char_pitch				; sprite pitch
+	STA load_sprite_data+1
+	LDA load_sprite_data+2
+	ADC #0
+	STA load_sprite_data+2
+
+	JMP y_loop
+	.done_y_loop
+	.not_visible
+
+	.return
+	RTS
+}
+
+.mode7_erase_sprite
+{
+	\\ Copy width and height in chars (bytes)
+	LDY #0
+	LDA (plot_ptr),Y
+	STA plot_char_w
+	INY
+	LDA (plot_ptr),Y
+	STA plot_char_h
+
+	\\ Calculate screen address from coordinates
+
+	\\ Look up address of row from y coordiante
+	LDY plot_y
+	LDA mode7_texel_y_to_row_addr_LO,Y
+	STA writeptr
+	LDA mode7_texel_y_to_row_addr_HI,Y
+	STA writeptr+1
+	
+	\\ Divide x coordinate by 2 for colum
+	LDA plot_x
+	LSR A							; x offset in carry
+
+	\\ Add column to writeptr
+	CLC
+	ADC writeptr
+	STA store_screen_addr+1			; ** MODIFIES CODE
+	LDA writeptr+1
+	ADC #0
+	STA store_screen_addr+2			; ** MODIFIES CODE
+
+	\\ Plot loop
+
+	\\ For each row
+	LDY plot_char_h
+	.y_loop
+
+	\\ Plot all chars
+	LDX #0
+	LDA #0
+	.x_loop
+	.store_screen_addr
+	STA &7C00,X						; ** SELF-MODIFIED CODE
+	INX
+	CPX plot_char_w
+	BNE x_loop
+
+	DEY
+	BEQ done
+
+	\\ Next line
+	CLC
+	LDA store_screen_addr+1
+	ADC #MODE7_char_width
+	STA store_screen_addr+1
+	LDA store_screen_addr+2
+	ADC #0
+	STA store_screen_addr+2
+	
+	JMP y_loop
+	.done
+
+	.return
+	RTS
+}
+
+\ ******************************************************************
+\ *	Look up tables
+\ ******************************************************************
+
+.mode7_row_addr_LO
+FOR n, 0, MODE7_char_height-1, 1
+EQUB LO(MODE7_base_addr + n * MODE7_char_width)
+NEXT
+
+.mode7_row_addr_HI
+FOR n, 0, MODE7_char_height-1, 1
+EQUB HI(MODE7_base_addr + n * MODE7_char_width)
+NEXT
+
+.mode7_texel_y_to_row_addr_LO
+FOR n, 0, MODE7_texel_height-1, 1
+	EQUB LO(MODE7_base_addr + ((n DIV 3) * MODE7_char_width) + PLOT_origin_col)
+NEXT
+
+.mode7_texel_y_to_row_addr_HI
+FOR n, 0, MODE7_texel_height-1, 1
+	EQUB HI(MODE7_base_addr + ((n DIV 3) * MODE7_char_width) + PLOT_origin_col)
+NEXT
+
+.mod3_table					; wasteful to have all 256 entries but safer for now
+FOR n, 0, 255, 1
+IF n < 128
+	EQUB (n MOD 3)
+ELSE
+	EQUB (3-((256-n) MOD 3)) MOD 3	; 255=-1 -> 2, 254=-2 -> 1, 253=-3 -> 0, 252=-4 -> 2 etc.
+ENDIF
+NEXT
+
+.div3_table					; wasteful to have all 256 entries but safer for now
+FOR n, 0, 255, 1
+	EQUB (n DIV 3)
+NEXT
+
+\ ******************************************************************
+\ *	Included data
+\ ******************************************************************
+
+INCLUDE "starhole.6502"
+
+\ ******************************************************************
+\ *	End address to be saved
+\ ******************************************************************
+
+.end
+
+
+\ ******************************************************************
+\ *	Space reserved for runtime buffers not preinitialised
+\ ******************************************************************
+
+ALIGN &100
+
+\ ******************************************************************
+\ *	Save the code
+\ ******************************************************************
+
+SAVE "M7Plot", start, end

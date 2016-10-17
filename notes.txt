@@ -1,0 +1,29 @@
+- Write plot routine in 6502
+  What is the coordinate system - is (0,0) top left or bottom left?
+ 
+- Including screen clipping - gah!
+  Top & bottom clip doesn't matter so much - can have spare buffer memory before and after is ROM
+  (Even if using RAM for music can buffer this carefully, 1k max)
+
+  Left clip: if x<0 then width+=x sprite_offset-=x x=0 check w>0
+  Right clip: if x+w>=screen then w=screen-x x can't be>screen
+  ARE YOU CLIPPING IN PIXEL COORDINATES OR CHARACTER COORDINATES?!
+
+- Test can draw at pixel accuracy and masking works etc.
+- Add code generation rather than data tables
+- Compare size of code vs data tables
+  (Some optimisations could be had here, e.g. using INY until need to increment ptr address)
+- Add ability to chop up sprite sheet (Font)
+- Add scaling to sprite generation? (Depends on demo effect)
+- Add rotation to sprite generation? (Depends on demo effect)
+- Get a nice 32x32 font going and scrolltext
+- Framework for MODE 7 demo with music from start
+
+
+- Generate code to do reflections and test
+- Generate code to wibble lines and test
+- Star field
+- Colour raster bars
+
+
+w-(x+w-screen)=screen-x
