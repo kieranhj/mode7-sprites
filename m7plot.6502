@@ -46,10 +46,16 @@ MODE7_alpha_black = 128
 MODE7_graphic_black = 144
 MODE7_contiguous = 153
 MODE7_separated = 154
+MODE7_black_bg = 156
+MODE7_new_bg = 157
 
 PLOT_origin_col = 4				; skip first 4 coloumns (col + newbg + col + sep)
 MODE7_texel_width = (MODE7_char_width - PLOT_origin_col) * 2
 MODE7_texel_height = MODE7_char_height * 3
+
+MIRROR_bottom_row = 24
+MIRROR_top_row = 22
+MIRROR_read_row = MIRROR_top_row - 1
 
 
 \ ******************************************************************
@@ -81,6 +87,7 @@ GUARD &A0
 .mirror_byte			SKIP 1
 .mirror_bit				SKIP 1
 
+.raster_idx				SKIP 1
 
 \ ******************************************************************
 \ *	Start address to be saved
@@ -111,6 +118,7 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	LDA #0
 	STA test_x
 	STA test_y
+	STA raster_idx
 
 	.loop
 
@@ -166,6 +174,7 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 
 	JSR mode7_plot_sprite
 
+	JSR mode7_raster_fx
 	JSR mode7_mirror_fx
 
 	JMP loop
@@ -178,57 +187,51 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 
 .teletexel_init
 {
-	LDX #MODE7_contiguous
-	LDY #MODE7_char_height - 1
+	LDX #0
 
 	.loop
-	TYA:PHA
-	LDA #MODE7_graphic_black + 7
-	JSR teletexel_set_row_start
-	PLA:TAY
-	DEY
-	BPL loop
-
-	.return
-	RTS
-}
-
-.teletexel_set_row_start			; set row Y to char A, X
-{
-	PHA
-	LDA mode7_row_addr_LO,Y
+	LDA mode7_row_addr_LO,X
 	STA writeptr
-	LDA mode7_row_addr_HI,Y
+	LDA mode7_row_addr_HI,X
 	STA writeptr+1
-
+	
 	LDY #0
-	PLA
+
+	CPX #MIRROR_top_row
+	BCC not_mirror
+	LDA #MODE7_graphic_black + 4
 	STA (writeptr),Y
-	TXA:INY
+
+	INY
+	LDA #MODE7_new_bg
 	STA (writeptr),Y
+	BNE done_mirror
+
+	.not_mirror
+	LDA #MODE7_graphic_black + 7
+	STA (writeptr),Y
+
+	INY
+	LDA #MODE7_black_bg
+	STA (writeptr),Y
+	
+	.done_mirror
+	INY
+	LDA #MODE7_contiguous
+	STA (writeptr),Y
+
+	INY
+	LDA #MODE7_graphic_black + 7
+	STA (writeptr),Y
+
+	INX
+	CPX #MODE7_char_height
+	BCC loop
 
 	.return
 	RTS
 }
 
-.teletexel_erase_row				; row Y
-{
-	LDA mode7_row_addr_LO,Y
-	STA writeptr
-	LDA mode7_row_addr_HI,Y
-	STA writeptr+1
-
-	LDA #32
-	LDY #39
-	.loop
-	STA (writeptr),Y
-	DEY
-	CPY #1
-	BNE loop
-
-	.return
-	RTS	
-}
 
 \ ******************************************************************
 \ *	Sprite plot routine
@@ -458,6 +461,7 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	RTS
 }
 
+IF 0
 .mode7_erase_sprite
 {
 	\\ Copy width and height in chars (bytes)
@@ -472,9 +476,12 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 
 	\\ Look up address of row from y coordiante
 	LDY plot_y
-	LDA mode7_texel_y_to_row_addr_LO,Y
+	LDA div3_table, Y
+	TAY
+
+	LDA mode7_row_addr_LO,Y
 	STA writeptr
-	LDA mode7_texel_y_to_row_addr_HI,Y
+	LDA mode7_row_addr_HI,Y
 	STA writeptr+1
 	
 	\\ Divide x coordinate by 2 for colum
@@ -484,6 +491,7 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	\\ Add column to writeptr
 	CLC
 	ADC writeptr
+	ADC #PLOT_origin_col
 	STA store_screen_addr+1			; ** MODIFIES CODE
 	LDA writeptr+1
 	ADC #0
@@ -523,14 +531,11 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	.return
 	RTS
 }
+ENDIF
 
 \ ******************************************************************
-\ *	Mirror fn
+\ *	Mirror FX
 \ ******************************************************************
-
-MIRROR_bottom_row = 24
-MIRROR_top_row = 22
-MIRROR_read_row = MIRROR_top_row - 1
 
 MIRROR_read_row0_addr = (MODE7_base_addr + ((MIRROR_read_row-0) * MODE7_char_width))
 MIRROR_read_row1_addr = (MODE7_base_addr + ((MIRROR_read_row-1) * MODE7_char_width))
@@ -627,6 +632,136 @@ MIRROR_write_row2_addr = (MODE7_base_addr + ((MIRROR_top_row+2) * MODE7_char_wid
 	RTS
 }
 
+
+\ ******************************************************************
+\ *	Raster FX
+\ ******************************************************************
+
+RASTER_centre_row = 11
+RASTER_wave_rows = 6
+RASTER_table_inc = 8
+RASTER_row0_addr = (MODE7_base_addr + ((RASTER_centre_row-6) * MODE7_char_width))
+RASTER_row1_addr = (MODE7_base_addr + ((RASTER_centre_row-5) * MODE7_char_width))
+RASTER_row2_addr = (MODE7_base_addr + ((RASTER_centre_row-4) * MODE7_char_width))
+RASTER_row3_addr = (MODE7_base_addr + ((RASTER_centre_row-3) * MODE7_char_width))
+RASTER_row4_addr = (MODE7_base_addr + ((RASTER_centre_row-2) * MODE7_char_width))
+RASTER_row5_addr = (MODE7_base_addr + ((RASTER_centre_row-1) * MODE7_char_width))
+RASTER_row6_addr = (MODE7_base_addr + ((RASTER_centre_row-0) * MODE7_char_width))
+RASTER_row7_addr = (MODE7_base_addr + ((RASTER_centre_row+1) * MODE7_char_width))
+RASTER_row8_addr = (MODE7_base_addr + ((RASTER_centre_row+2) * MODE7_char_width))
+RASTER_row9_addr = (MODE7_base_addr + ((RASTER_centre_row+3) * MODE7_char_width))
+RASTER_row10_addr = (MODE7_base_addr + ((RASTER_centre_row+4) * MODE7_char_width))
+RASTER_row11_addr = (MODE7_base_addr + ((RASTER_centre_row+5) * MODE7_char_width))
+RASTER_row12_addr = (MODE7_base_addr + ((RASTER_centre_row+6) * MODE7_char_width))
+
+.mode7_raster_fx
+{
+	LDA #MODE7_black_bg
+	STA RASTER_row0_addr+1
+	STA RASTER_row1_addr+1
+	STA RASTER_row2_addr+1
+	STA RASTER_row3_addr+1
+	STA RASTER_row4_addr+1
+	STA RASTER_row5_addr+1
+	STA RASTER_row6_addr+1
+	STA RASTER_row7_addr+1
+	STA RASTER_row8_addr+1
+	STA RASTER_row9_addr+1
+	STA RASTER_row10_addr+1
+	STA RASTER_row11_addr+1
+	STA RASTER_row12_addr+1
+
+	LDX raster_idx
+	LDA raster_y_table, X
+	TAY
+	LDA mode7_row_addr_LO,Y
+	STA writeptr
+	LDA mode7_row_addr_HI,Y
+	STA writeptr+1
+	LDY #0
+	LDA #MODE7_graphic_black + 1
+	STA (writeptr),Y
+	INY
+	LDA #MODE7_new_bg
+	STA (writeptr),Y
+
+	TXA:CLC:ADC #RASTER_table_inc:TAX
+	LDA raster_y_table, X
+	TAY
+	LDA mode7_row_addr_LO,Y
+	STA writeptr
+	LDA mode7_row_addr_HI,Y
+	STA writeptr+1
+	LDY #0
+	LDA #MODE7_graphic_black + 2
+	STA (writeptr),Y
+	INY
+	LDA #MODE7_new_bg
+	STA (writeptr),Y
+
+	TXA:CLC:ADC #RASTER_table_inc:TAX
+	LDA raster_y_table, X
+	TAY
+	LDA mode7_row_addr_LO,Y
+	STA writeptr
+	LDA mode7_row_addr_HI,Y
+	STA writeptr+1
+	LDY #0
+	LDA #MODE7_graphic_black + 3
+	STA (writeptr),Y
+	INY
+	LDA #MODE7_new_bg
+	STA (writeptr),Y
+
+	TXA:CLC:ADC #RASTER_table_inc:TAX
+	LDA raster_y_table, X
+	TAY
+	LDA mode7_row_addr_LO,Y
+	STA writeptr
+	LDA mode7_row_addr_HI,Y
+	STA writeptr+1
+	LDY #0
+	LDA #MODE7_graphic_black + 4
+	STA (writeptr),Y
+	INY
+	LDA #MODE7_new_bg
+	STA (writeptr),Y
+
+	TXA:CLC:ADC #RASTER_table_inc:TAX
+	LDA raster_y_table, X
+	TAY
+	LDA mode7_row_addr_LO,Y
+	STA writeptr
+	LDA mode7_row_addr_HI,Y
+	STA writeptr+1
+	LDY #0
+	LDA #MODE7_graphic_black + 5
+	STA (writeptr),Y
+	INY
+	LDA #MODE7_new_bg
+	STA (writeptr),Y
+
+	TXA:CLC:ADC #RASTER_table_inc:TAX
+	LDA raster_y_table, X
+	TAY
+	LDA mode7_row_addr_LO,Y
+	STA writeptr
+	LDA mode7_row_addr_HI,Y
+	STA writeptr+1
+	LDY #0
+	LDA #MODE7_graphic_black + 6
+	STA (writeptr),Y
+	INY
+	LDA #MODE7_new_bg
+	STA (writeptr),Y
+
+	INC raster_idx
+	INC raster_idx
+
+	.return
+	RTS
+}
+
 \ ******************************************************************
 \ *	Look up tables
 \ ******************************************************************
@@ -641,16 +776,6 @@ FOR n, 0, MODE7_char_height-1, 1
 EQUB HI(MODE7_base_addr + n * MODE7_char_width)
 NEXT
 
-.mode7_texel_y_to_row_addr_LO
-FOR n, 0, MODE7_texel_height-1, 1
-	EQUB LO(MODE7_base_addr + ((n DIV 3) * MODE7_char_width) + PLOT_origin_col)
-NEXT
-
-.mode7_texel_y_to_row_addr_HI
-FOR n, 0, MODE7_texel_height-1, 1
-	EQUB HI(MODE7_base_addr + ((n DIV 3) * MODE7_char_width) + PLOT_origin_col)
-NEXT
-
 .mod3_table					; wasteful to have all 256 entries but safer for now
 FOR n, 0, 255, 1
 IF n < 128
@@ -663,6 +788,11 @@ NEXT
 .div3_table					; wasteful to have all 256 entries but safer for now
 FOR n, 0, 255, 1
 	EQUB (n DIV 3)
+NEXT
+
+.raster_y_table				; don't need 256 entries but easier for now
+FOR n, 0, 255, 1
+	EQUB RASTER_centre_row + RASTER_wave_rows * SIN(PI * n / 128)
 NEXT
 
 \ ******************************************************************
