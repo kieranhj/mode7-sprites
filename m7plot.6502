@@ -57,6 +57,8 @@ MIRROR_bottom_row = 24
 MIRROR_top_row = 22
 MIRROR_read_row = MIRROR_top_row - 1
 
+STARS_num = 22
+
 
 \ ******************************************************************
 \ *	Define fast (zero page) runtime variables
@@ -114,6 +116,7 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	\\ Turn off cursor!
 
 	JSR teletexel_init
+	JSR mode7_starfield_init
 
 	LDA #0
 	STA test_x
@@ -175,6 +178,7 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	JSR mode7_plot_sprite
 
 	JSR mode7_raster_fx
+	JSR mode7_starfield_fx
 	JSR mode7_mirror_fx
 
 	JMP loop
@@ -762,6 +766,94 @@ RASTER_row12_addr = (MODE7_base_addr + ((RASTER_centre_row+6) * MODE7_char_width
 	RTS
 }
 
+
+\ ******************************************************************
+\ *	Starfield FX
+\ ******************************************************************
+
+STARS_row0_addr = (MODE7_base_addr + ((0) * MODE7_char_width))
+
+.mode7_starfield_init
+{
+	LDA #0
+
+	LDY #STARS_num-1
+	.loop
+	STA stars_table_byte,Y
+	DEY
+	BPL loop
+
+	.return
+	RTS
+}
+
+.mode7_starfield_fx
+{
+	LDA #LO(MODE7_base_addr + PLOT_origin_col)
+	STA writeptr
+	LDA #HI(MODE7_base_addr + PLOT_origin_col)
+	STA writeptr+1
+
+	LDX #0
+	.loop
+
+	\\ Erase old star
+	LDA stars_table_byte,X
+	CMP #32
+	BNE no_erase
+	LDA stars_table_x,X
+	LSR A:LSR A:TAY:LDA #32
+	STA (writeptr),Y
+
+	.no_erase
+	\\ Update star x position based on speed & wrap
+	CLC
+	LDA stars_table_x,X
+	ADC stars_table_speed,X
+	CMP #MODE7_texel_width*2
+	BCC no_wrap
+	SBC #MODE7_texel_width*2
+	.no_wrap
+	STA stars_table_x,X
+
+	\\ Calculate x char
+	LSR A:LSR A:TAY
+
+	\\ Is there something there already?
+	LDA (writeptr), Y
+	STA stars_table_byte,X
+	CMP #32
+	BNE skip_write
+
+	\\ Plot our star
+	LDA stars_table_x,X
+	LSR A
+	AND #&1						; odd or even
+	CLC
+	ADC #33						; 1 or 2 OR 32
+	STA (writeptr), Y			; reuses Y as x char from above
+
+	.skip_write
+
+	\\ Next star
+	INX
+	CPX #STARS_num
+	BCS return
+
+	\\ Next row
+	CLC
+	LDA writeptr
+	ADC #MODE7_char_width
+	STA writeptr
+	BCC no_carry
+	INC writeptr+1
+	.no_carry
+	JMP loop
+
+	.return
+	RTS
+}
+
 \ ******************************************************************
 \ *	Look up tables
 \ ******************************************************************
@@ -795,6 +887,17 @@ FOR n, 0, 255, 1
 	EQUB RASTER_centre_row + RASTER_wave_rows * SIN(PI * n / 128)
 NEXT
 
+.stars_table_x
+FOR n, 0, STARS_num, 1
+	EQUB RND(MODE7_texel_width * 2)
+NEXT
+
+.stars_table_speed
+FOR n, 0, STARS_num, 1
+	EQUB 1+RND(3)
+NEXT
+
+
 \ ******************************************************************
 \ *	Included data
 \ ******************************************************************
@@ -811,6 +914,9 @@ INCLUDE "starhole.6502"
 \ ******************************************************************
 \ *	Space reserved for runtime buffers not preinitialised
 \ ******************************************************************
+
+.stars_table_byte
+SKIP STARS_num
 
 ALIGN &100
 
