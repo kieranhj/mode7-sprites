@@ -9,6 +9,8 @@
   Right clip: if x+w>=screen then w=screen-x x can't be>screen
   ARE YOU CLIPPING IN PIXEL COORDINATES OR CHARACTER COORDINATES?!
 
+  DONE - coordinates (0,0) are top left, can use negative coordinates - could be simplified
+
 - Test can draw at pixel accuracy and masking works etc.
 - Add code generation rather than data tables
 - Compare size of code vs data tables
@@ -20,10 +22,53 @@
 - Framework for MODE 7 demo with music from start
 
 
-- Generate code to do reflections and test
+- Generate code to do reflections and test - DONE
 - Generate code to wibble lines and test
-- Star field
-- Colour raster bars
+- Star field - DONE
+- Colour raster bars - DONE-ISH
 
 
-w-(x+w-screen)=screen-x
+Sprite sizes
+
+Font set = 26 letters + 10 numbers + ~10 punctuation = 46
+Texel size = 72x75 pixels = 36x25 chars
+
+32x32 sprite = 16x11 chars = 176 bytes x 6 offsets = 1056 bytes + mask = 2112 bytes
+Font set x46 = 97152 bytes or 48576 bytes w/o mask  |  2.25x2.34 glyphs
+
+24x24 sprite = 12x8 chars = 96 bytes x 6 offsets = 576 bytes + mask = 1152 bytes
+Font set x46 = 52992 bytes or 26498 bytes w/o mask  |  3.17x3.125 glyphs
+
+16x16 sprite = 8x6 chars = 48 bytes x 6 offsets = 288 bytes + mask = 576 bytes
+Font set x46 = 26496 bytes or 13248 bytes w/o mask  |  4.75x4.7 glyphs
+
+12x12 sprite = 6x4 chars = 24 bytes x 6 offsets = 144 bytes + mask = 288 bytes
+Font set x46 = 13248 bytes or 6624 bytes w/o mask  |  6.33x6.25 glyphs
+
+Options
+- No mask
+- Interleave mask data with sprite data somehow
+  E.g. sprite data=0 -> draw nothing, sprite data!=0 -> write, sprite data top bit set means this byte is mask
+  Won't halve sprite data but could offer some reductions
+- Don't store all 6x offsets..
+  - Only need offsets for the sprites being plotted - how many on screen at one time?  6 max? 
+    Generate additional 5x offsets on the fly and keep a cache of sprite data
+    How long does it take to generate 5x glyphs?
+  - Plot with pixel accuracy directly using sprite data
+    How much shifting & bit manipulation is required to do this?
+    Each byte written to the screen could be a combination of 3x sprite data bytes
+    Rather than storing sprite data as MODE 7 characters is there another data format that can be more
+    optimally transformed into pixel aligned MODE 7 characters on demand?
+    
+E.g. store as MODE 0 type data
+1bpp, 1 byte = 8 consecutive pixels = 4 characters
+For first character, load correct 3x bytes into scratch memory corresponding to pixel rows
+Mask out correct 2x bits for character, rotate scratch bytes down accordingly, repeat x4
+This could work if always assume that right-most pixel is padding (i.e. gets lost on odd rotate)
+Also assume that bottom two rows are lost?  (Might not be necessary as might be able to just assume value 0)
+
+Can only support pixel width of 7, 15, 23, 31 etc.  Pixel height always rounded up to x3
+Could unroll both the inner loop (1 byte = 8 pixels = 4 characters) for both offsets
+Can handle the annoying bit pattern for bottom pixel row manually in unrolled loop (mask 1 bit at a time)
+
+32x32 sprite = 4x32 bytes = 128 bytes + mask = 256 bytes with no duplicates for offsets

@@ -83,8 +83,10 @@ GUARD &A0
 .plot_char_x			SKIP 1			; x position in chars absolute
 .plot_char_y			SKIP 1			; y position in chars absolute
 .plot_char_pitch		SKIP 1			; pitch of sprite data in chars
-.plot_diff_x			SKIP 1
-.plot_diff_y			SKIP 1
+.plot_diff_x			SKIP 1			; #characters clipped on left edge
+.plot_diff_y			SKIP 1			; #character rows clipped on top edge
+.plot_linear_byte		SKIP 3			; 3x linear sprite data bytes
+.plot_char_byte			SKIP 1
 
 .mirror_byte			SKIP 1
 .mirror_bit				SKIP 1
@@ -129,15 +131,14 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	LDA #19
 	JSR osbyte
 
-	LDA test_x
-	STA plot_x
-	LDA test_y
-	STA plot_y
-	LDA #LO(starhole)
-	STA plot_ptr
-	LDA #HI(starhole)
-	STA plot_ptr+1
-
+;	LDA test_x
+;	STA plot_x
+;	LDA test_y
+;	STA plot_y
+;	LDA #LO(starhole)
+;	STA plot_ptr
+;	LDA #HI(starhole)
+;	STA plot_ptr+1
 ;	JSR mode7_erase_sprite
 
 	\\ Check for Escape key
@@ -170,12 +171,12 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	STA plot_x
 	LDA test_y
 	STA plot_y
-	LDA #LO(starhole)
+	LDA #LO(starlin)
 	STA plot_ptr
-	LDA #HI(starhole)
+	LDA #HI(starlin)
 	STA plot_ptr+1
 
-	JSR mode7_plot_sprite
+	JSR mode7_plot_linear
 
 	JSR mode7_raster_fx
 	JSR mode7_starfield_fx
@@ -460,6 +461,303 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	JMP y_loop
 	.done_y_loop
 	.not_visible
+
+	.return
+	RTS
+}
+
+.mode7_plot_linear
+{
+	\\ Copy width and height in byte
+	LDY #0
+	STY plot_diff_x
+	STY plot_diff_y 
+
+	LDA (plot_ptr),Y
+	STA plot_char_w
+	STA plot_char_pitch				; store pitch
+	INY
+	LDA (plot_ptr),Y
+	STA plot_char_h
+
+	\\ Calculate character coordiantes
+	LDA plot_x
+	LSR A
+	CLC
+	ADC #PLOT_origin_col
+	STA plot_char_x
+
+	LDY plot_y
+	LDA div3_table, Y
+	STA plot_char_y
+
+	\\ Calculate screen address from coordinates
+	LDY plot_char_y
+
+	\\ Look up address of row from y coordinates
+	CLC
+	LDA mode7_row_addr_LO,Y
+	ADC plot_char_x
+	STA writeptr
+	LDA mode7_row_addr_HI,Y
+	ADC #0
+	STA writeptr+1
+
+	\\ Calculate x,y offset from coordinates
+	LDA plot_x
+	AND #1
+	STA plot_x_offset
+
+	\\ Need to select correct sprite data for x offset! ***
+
+	\\ Then read off the data address LO & HI - mmph
+	CLC
+	LDA plot_ptr
+	ADC #2
+	STA load_sprite_byte0+1
+	LDA plot_ptr+1
+	ADC #0
+	STA load_sprite_byte0+2
+
+	\\ Pointer to byte 1
+	CLC
+	LDA load_sprite_byte0+1
+	ADC plot_char_pitch
+	STA load_sprite_byte1+1
+	LDA load_sprite_byte0+2
+	ADC #0
+	STA load_sprite_byte1+2
+
+	\\ Pointer to byte 2
+	CLC
+	LDA load_sprite_byte1+1
+	ADC plot_char_pitch
+	STA load_sprite_byte2+1
+	LDA load_sprite_byte1+2
+	ADC #0
+	STA load_sprite_byte2+2
+
+	\\ For each character row
+	.y_loop
+
+	LDX #0
+	LDY #0
+	.x_loop
+
+	\\ Read three pixel rows at a time
+	.load_sprite_byte0
+	LDA starlin_data, X
+	STA plot_linear_byte + 0
+
+	.load_sprite_byte1
+	LDA starlin_data+4, X				; +pitch
+	STA plot_linear_byte + 1
+
+	.load_sprite_byte2
+	LDA starlin_data+8, X				; +pitch*2
+	STA plot_linear_byte + 2
+
+	\\ Might make more sense to arrange data in row-wise order?
+
+	\\ First char - bits 7&6
+
+	LDA #32
+	STA plot_char_byte
+
+	\\ First row - bits 7&6 of linear byte become 1&0 of char byte
+	LDA plot_linear_byte + 0
+	;AND #&C0						; not needed because of shift x 6
+	LSR A: LSR A: LSR A: LSR A: LSR A: LSR A	; shift down 6
+	ORA plot_char_byte
+	STA plot_char_byte
+
+	\\ Second row - bits 7&6 of linear byte become 3&2 of char byte
+	LDA plot_linear_byte + 1
+	AND #&C0
+	LSR A: LSR A: LSR A: LSR A					; shift down 4
+	ORA plot_char_byte
+	STA plot_char_byte
+
+	\\ Third row - bits 7&6 of linear byte become 6&4 of char byte
+	LDA plot_linear_byte + 2
+	AND #&80
+	LSR A										; shift down 1
+	ORA plot_char_byte
+	STA plot_char_byte
+
+	LDA plot_linear_byte + 2
+	AND #&40
+	LSR A:LSR A									; shift down 2
+	ORA plot_char_byte
+	STA plot_char_byte
+
+
+	\\ Can finally plot one byte to screen!
+	STA (writeptr), Y
+
+	\\ Next char
+	INY
+
+	LDA #32
+	STA plot_char_byte
+
+	\\ Second char - bits 5&4
+
+	\\ First row - bits 5&4 of linear byte become 1&0 of char byte
+	LDA plot_linear_byte + 0
+	AND #&30
+	LSR A: LSR A: LSR A: LSR A					; shift down 4
+	ORA plot_char_byte
+	STA plot_char_byte
+
+	\\ Second row - bits 5&4 of linear byte become 3&2 of char byte
+	LDA plot_linear_byte + 1
+	AND #&30
+	LSR A: LSR A								; shift down 2
+	ORA plot_char_byte
+	STA plot_char_byte
+
+	\\ Third row - bits 5&4 of linear byte become 6&4 of char byte
+	LDA plot_linear_byte + 2
+	AND #&20
+	ASL A
+	ORA plot_char_byte
+	STA plot_char_byte
+
+	LDA plot_linear_byte + 2
+	AND #&10
+	ORA plot_char_byte
+	STA plot_char_byte
+
+	\\ Can finally plot one byte to screen!
+	STA (writeptr), Y
+
+	\\ Next char
+	INY
+
+	LDA #32
+	STA plot_char_byte
+
+	\\ Third char - bits 3&2
+
+	\\ First row - bits 3&2 of linear byte become 1&0 of char byte
+	LDA plot_linear_byte + 0
+	AND #&0C
+	LSR A: LSR A								; shift down 2
+	ORA plot_char_byte
+	STA plot_char_byte
+
+	\\ Second row - bits 3&2 of linear byte become 3&2 of char byte
+	LDA plot_linear_byte + 1
+	AND #&0C
+	ORA plot_char_byte
+	STA plot_char_byte
+
+	\\ Third row - bits 3&2 of linear byte become 6&4 of char byte
+	LDA plot_linear_byte + 2
+	AND #&08
+	ASL A: ASL A: ASL A							; shift up 3
+	ORA plot_char_byte
+	STA plot_char_byte
+
+	LDA plot_linear_byte + 2
+	AND #&04
+	ASL A: ASL A								; shift up 2
+	ORA plot_char_byte
+	STA plot_char_byte
+
+	\\ Can finally plot one byte to screen!
+	STA (writeptr), Y
+
+	\\ Next char
+	INY
+
+	LDA #32
+	STA plot_char_byte
+
+	\\ Fourth char - bits 1&0
+
+	\\ First row - bits 1&0 of linear byte become 1&0 of char byte
+	LDA plot_linear_byte + 0
+	AND #&03
+	ORA plot_char_byte
+	STA plot_char_byte
+
+	\\ Second row - bits 1&0 of linear byte become 3&2 of char byte
+	LDA plot_linear_byte + 1
+	AND #&03
+	ASL A: ASL A								; shift up 2
+	ORA plot_char_byte
+	STA plot_char_byte
+
+	\\ Third row - bits 1&0 of linear byte become 6&4 of char byte
+	LDA plot_linear_byte + 2
+	AND #&02
+	ASL A: ASL A: ASL A: ASL A: ASL A			; shift up 5
+	ORA plot_char_byte
+	STA plot_char_byte
+
+	LDA plot_linear_byte + 2
+	AND #&01
+	ASL A: ASL A: ASL A: ASL A					; shift up 4
+	ORA plot_char_byte
+	STA plot_char_byte
+
+	\\ Can finally plot one byte to screen!
+	STA (writeptr), Y
+
+	\\ Next char
+	INY
+
+	\\ Next byte of sprite data
+	INX
+	CPX plot_char_w
+	BCS next_row
+
+	JMP x_loop
+	
+	\\ Next character row
+	.next_row
+	DEC plot_char_h
+	BEQ return
+
+	\\ Increment screen write pointer
+	CLC
+	LDA writeptr
+	ADC #MODE7_char_width			; screen pitch
+	STA writeptr
+	LDA writeptr+1
+	ADC #0
+	STA writeptr+1
+	
+	\\ Increment sprite data read ptrs
+	CLC
+	LDA load_sprite_byte2+1
+	ADC plot_char_pitch
+	STA load_sprite_byte0+1
+	LDA load_sprite_byte2+2
+	ADC #0
+	STA load_sprite_byte0+2
+
+	\\ Pointer to byte 1
+	CLC
+	LDA load_sprite_byte0+1
+	ADC plot_char_pitch
+	STA load_sprite_byte1+1
+	LDA load_sprite_byte0+2
+	ADC #0
+	STA load_sprite_byte1+2
+
+	\\ Pointer to byte 2
+	CLC
+	LDA load_sprite_byte1+1
+	ADC plot_char_pitch
+	STA load_sprite_byte2+1
+	LDA load_sprite_byte1+2
+	ADC #0
+	STA load_sprite_byte2+2
+
+	JMP y_loop
 
 	.return
 	RTS
@@ -902,7 +1200,8 @@ NEXT
 \ *	Included data
 \ ******************************************************************
 
-INCLUDE "starhole.6502"
+;INCLUDE "starhole.6502"
+INCLUDE "starlin.6502"
 
 \ ******************************************************************
 \ *	End address to be saved
