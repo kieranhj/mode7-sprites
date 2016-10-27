@@ -86,6 +86,11 @@ GUARD &A0
 .plot_diff_x			SKIP 1
 .plot_diff_y			SKIP 1
 
+.plot_half_left			SKIP 1
+.plot_half_right		SKIP 1
+.plot_half_byte			SKIP 1
+.plot_half_x			SKIP 1
+
 .mirror_byte			SKIP 1
 .mirror_bit				SKIP 1
 
@@ -129,15 +134,14 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	LDA #19
 	JSR osbyte
 
-	LDA test_x
-	STA plot_x
-	LDA test_y
-	STA plot_y
-	LDA #LO(starhole)
-	STA plot_ptr
-	LDA #HI(starhole)
-	STA plot_ptr+1
-
+;	LDA test_x
+;	STA plot_x
+;	LDA test_y
+;	STA plot_y
+;	LDA #LO(starhole)
+;	STA plot_ptr
+;	LDA #HI(starhole)
+;	STA plot_ptr+1
 ;	JSR mode7_erase_sprite
 
 	\\ Check for Escape key
@@ -170,14 +174,14 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	STA plot_x
 	LDA test_y
 	STA plot_y
-	LDA #LO(starhole)
+	LDA #LO(starhalf)
 	STA plot_ptr
-	LDA #HI(starhole)
+	LDA #HI(starhalf)
 	STA plot_ptr+1
 
-	JSR mode7_plot_sprite
+	JSR mode7_plot_half
 
-	JSR mode7_raster_fx
+;	JSR mode7_raster_fx
 	JSR mode7_starfield_fx
 	JSR mode7_mirror_fx
 
@@ -460,6 +464,143 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	JMP y_loop
 	.done_y_loop
 	.not_visible
+
+	.return
+	RTS
+}
+
+.mode7_plot_half
+{
+	\\ Zero any temporary variables
+	LDY #0
+
+	\\ Copy width and height in chars (bytes)
+	LDA (plot_ptr),Y
+	STA plot_char_w
+	STA plot_char_pitch				; store pitch
+	INY
+	LDA (plot_ptr),Y
+	STA plot_char_h
+
+	\\ Character (x,y)
+	LDA plot_x
+	LSR A
+	CLC
+	ADC #PLOT_origin_col
+	STA plot_char_x
+
+	LDY plot_y
+	LDA div3_table, Y
+	STA plot_char_y
+
+	\\ (x,y) offset
+	LDA mod3_table, Y
+	STA plot_y_offset
+
+	LDA plot_x
+	AND #&1
+	STA plot_x_offset
+
+	\\ Calculate screen address from coordinates
+	LDY plot_char_y
+
+	\\ Look up address of row from y coordinates
+	CLC
+	LDA mode7_row_addr_LO, Y
+	ADC plot_char_x
+	STA screen_write_addr+1
+	LDA mode7_row_addr_HI, Y
+	ADC #0
+	STA screen_write_addr+2
+
+	\\ Set up left & right side table indices - could pre-calc the shift
+	LDA plot_y_offset
+	ASL A: ASL A: ASL A: ASL A: ASL A: ASL A
+	STA plot_half_left
+
+	ORA #&20
+	STA plot_half_right
+
+	\\ Read address start of sprite data - can get caller to set this
+	CLC
+	LDA plot_ptr
+	ADC #2
+	STA readptr
+	LDA plot_ptr+1
+	ADC #0
+	STA readptr+1
+
+	\\ Plot loop
+	.y_loop
+	LDX #0						; index across screen row
+	LDA plot_x_offset			
+	EOR #1
+	TAY							; index into sprite data
+
+	.x_loop
+	STX plot_half_x
+
+	\\ Get left column of sprite data
+	LDA (readptr), Y
+
+	\\ Turn this into MODE 7 gfx code for left column
+	ORA plot_half_left         ; where left_header = yy0 00000
+	TAX
+	LDA half_column_lookup, X
+
+	\\ Store it
+	STA plot_half_byte
+
+	\\ Get right column of sprite data
+	INY
+	LDA (readptr), Y
+
+	\\ Turn this into MODE 7 gfx code for right column
+	ORA plot_half_right        ; where right_header = yy1 00000
+	TAX
+	LDA half_column_lookup, X
+
+	\\ Combine it with left column
+	ORA plot_half_byte         ; mask in other half
+
+	\\ Write combined columns to screen	
+	LDX plot_half_x
+	.screen_write_addr
+	STA &7C00, X				; write to screen
+	INX
+
+	\\ Have we reached end of columns?
+	INY
+	CPY plot_char_w
+	BCC x_loop
+
+	\\ Have we reached end of rows?
+	DEC plot_char_h
+	BEQ return
+
+	\\ Next line on screen
+	{
+		CLC
+		LDA screen_write_addr+1
+		ADC #MODE7_char_width			; screen pitch
+		STA screen_write_addr+1
+		BCC no_carry
+		INC screen_write_addr+2
+		.no_carry
+	}
+
+	\\ Next line of sprite data - is contiguous but > 256 bytes 
+	{
+		CLC
+		LDA readptr
+		ADC plot_char_pitch
+		STA readptr
+		BCC no_carry
+		INC readptr+1
+		.no_carry
+	}
+	
+	JMP y_loop	
 
 	.return
 	RTS
@@ -897,12 +1038,45 @@ FOR n, 0, STARS_num, 1
 	EQUB 1+RND(3)
 NEXT
 
+.half_column_lookup
+FOR n, 0, 192, 1
+	a = n AND 1
+	b = (n AND 2) / 2
+	c = (n AND 4) / 4
+	d = (n AND 8) / 8
+	e = (n AND 16) / 16
+
+	x = (n AND 32) / 32
+	yy = (n AND 192) / 64
+
+	IF x = 0
+
+		IF yy = 0
+			EQUB 32 + a * 16 + b * 4 + c * 1
+		ELIF yy = 1
+			EQUB 32 + b * 16 + c * 4 + d * 1
+		ELSE
+			EQUB 32 + c * 16 + d * 4 + e * 1
+		ENDIF
+
+	ELSE
+
+		IF yy = 0
+			EQUB 32 + a * 64 + b * 8 + c * 2
+		ELIF yy = 1
+			EQUB 32 + b * 64 + c * 8 + d * 2
+		ELSE
+			EQUB 32 + c * 64 + d * 8 + e * 2
+		ENDIF
+
+	ENDIF
+NEXT
 
 \ ******************************************************************
 \ *	Included data
 \ ******************************************************************
 
-INCLUDE "starhole.6502"
+INCLUDE "starhalf.6502"
 
 \ ******************************************************************
 \ *	End address to be saved

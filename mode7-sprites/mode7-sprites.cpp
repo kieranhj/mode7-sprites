@@ -69,18 +69,15 @@ int main(int argc, char **argv)
 
 	if (cimg_option("-h", false, 0)) std::exit(0);
 	if (input_name == NULL)  std::exit(0);
+	if (output_name == NULL)  std::exit(0);
+	if (label == NULL)  std::exit(0);
 
-	FILE *outfile = NULL;
+	FILE *outfile = fopen(output_name, "w");
 
-	if (output_name)
+	if (outfile == NULL)
 	{
-		outfile = fopen(output_name, "w");
-
-		if (label == NULL)
-		{
-			printf("Error: Need label if saving\n");
-			std::exit(0);
-		}
+		printf("Failed to open output file '%s' for writing.\n", output_name);
+		std::exit(0);
 	}
 
 	src.assign(input_name);
@@ -99,117 +96,39 @@ int main(int argc, char **argv)
 
 	printf("Pixels=%d x %d\n", pixel_width, pixel_height);
 	printf("Chars=%d x %d\n", char_width, char_height);
+
+	fprintf(outfile, "\\\\ Input file '%s'\n", input_name);
+	fprintf(outfile, "\\\\ Image size=%dx%d pixels=%dx%d\n", src._width, src._height, pixel_width, pixel_height);
+	fprintf(outfile, ".%s\n", label);
+
 	
-	if (outfile)
+	fprintf(outfile, "EQUB %d, %d\t;pixel width, char height\n", pixel_width, char_height);
+	fprintf(outfile, ".%s_data\n", label);
+
+	for (int y = -2; y < pixel_height - 2; y += 3)
 	{
-		fprintf(outfile, "\\\\ Input file '%s'\n", input_name);
-		fprintf(outfile, "\\\\ Image size=%dx%d pixels=%dx%d\n", src._width, src._height, pixel_width, pixel_height);
-		fprintf(outfile, ".%s\n", label);
-		fprintf(outfile, "EQUB %d, %d\t;char width, char height\n", char_width, char_height);
-		fprintf(outfile, ".%s_table\n", label);
+		fprintf(outfile, "EQUB ");
 
-		for (int x_offset = 0; x_offset < 2; x_offset++)
+		for (int x = -1; x < pixel_width - 1; x++)
 		{
-			for (int y_offset = 0; y_offset < 3; y_offset++)
+			if (x != -1)
 			{
-				fprintf(outfile, "EQUB LO(%s_char%d%d), HI(%s_char%d%d)\n", label, x_offset, y_offset, label, x_offset, y_offset);
+				fprintf(outfile, ",");
 			}
+
+			unsigned char pixels = (get_pixel_from_image(x, y, 0, 0) == 7 ? 16 : 0)
+				+ (get_pixel_from_image(x, y + 1, 0, 0) == 7 ? 8 : 0)
+				+ (get_pixel_from_image(x, y + 2, 0, 0) == 7 ? 4 : 0)
+				+ (get_pixel_from_image(x, y + 3, 0, 0) == 7 ? 2 : 0)
+				+ (get_pixel_from_image(x, y + 4, 0, 0) == 7 ? 1 : 0);
+
+			fprintf(outfile, "%d", pixels);
 		}
 
-		if (mask)
-		{
-			fprintf(outfile, ".%s_masks\n", label);
-
-			for (int x_offset = 0; x_offset < 2; x_offset++)
-			{
-				for (int y_offset = 0; y_offset < 3; y_offset++)
-				{
-					fprintf(outfile, "EQUB LO(%s_mask%d%d), HI(%s_mask%d%d)\n", label, x_offset, y_offset, label, x_offset, y_offset);
-				}
-			}
-		}
+		fprintf(outfile, "\n");
 	}
 
-	for (int x_offset = 0; x_offset < 2; x_offset++)
-	{
-		for (int y_offset = 0; y_offset < 3; y_offset++)
-		{
-			printf("Offset [%d, %d]\n", x_offset, y_offset);
-
-			if (outfile)
-			{
-				fprintf(outfile, ".%s_char%d%d\n", label, x_offset, y_offset);
-			}
-
-			for (int y7 = 0; y7 < char_height; y7++)
-			{
-				if (outfile)
-				{
-					fprintf(outfile, "EQUB ");
-				}
-
-				for (int x7 = 0; x7 < char_width; x7++)
-				{
-					unsigned char gfx_char = get_graphic_char_from_image(x7, y7, x_offset, y_offset);
-
-					if (outfile)
-					{
-						if (x7 != 0)
-						{
-							fprintf(outfile, ",");
-						}
-						fprintf(outfile, "%d", gfx_char);		// , mask_char);
-					}
-				}
-
-				if (outfile)
-				{
-					fprintf(outfile, "\n");
-				}
-			}
-		}
-	}
-
-	for (int x_offset = 0; x_offset < 2; x_offset++)
-	{
-		for (int y_offset = 0; y_offset < 3; y_offset++)
-		{
-			printf("Offset [%d, %d]\n", x_offset, y_offset);
-
-			if (outfile)
-			{
-				fprintf(outfile, ".%s_mask%d%d\n", label, x_offset, y_offset);
-			}
-
-			for (int y7 = 0; y7 < char_height; y7++)
-			{
-				if (outfile)
-				{
-					fprintf(outfile, "EQUB ");
-				}
-
-				for (int x7 = 0; x7 < char_width; x7++)
-				{
-					unsigned char mask_char = get_mask_char_from_image(x7, y7, x_offset, y_offset);
-
-					if (outfile)
-					{
-						if (x7 != 0)
-						{
-							fprintf(outfile, ",");
-						}
-						fprintf(outfile, "%d", mask_char);		// , mask_char);
-					}
-				}
-
-				if (outfile)
-				{
-					fprintf(outfile, "\n");
-				}
-			}
-		}
-	}
+	fclose(outfile);
 
 	return 0;
 }
-
