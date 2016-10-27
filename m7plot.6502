@@ -86,6 +86,9 @@ GUARD &A0
 .plot_diff_x			SKIP 1
 .plot_diff_y			SKIP 1
 
+.plot_stripe_byte		SKIP 1
+.plot_stripe_prev		SKIP 1
+
 .mirror_byte			SKIP 1
 .mirror_bit				SKIP 1
 
@@ -129,15 +132,14 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	LDA #19
 	JSR osbyte
 
-	LDA test_x
-	STA plot_x
-	LDA test_y
-	STA plot_y
-	LDA #LO(starhole)
-	STA plot_ptr
-	LDA #HI(starhole)
-	STA plot_ptr+1
-
+;	LDA test_x
+;	STA plot_x
+;	LDA test_y
+;	STA plot_y
+;	LDA #LO(starhole)
+;	STA plot_ptr
+;	LDA #HI(starhole)
+;	STA plot_ptr+1
 ;	JSR mode7_erase_sprite
 
 	\\ Check for Escape key
@@ -170,14 +172,14 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	STA plot_x
 	LDA test_y
 	STA plot_y
-	LDA #LO(starhole)
+	LDA #LO(starstrp)
 	STA plot_ptr
-	LDA #HI(starhole)
+	LDA #HI(starstrp)
 	STA plot_ptr+1
 
-	JSR mode7_plot_sprite
+	JSR mode7_plot_stripe
 
-	JSR mode7_raster_fx
+;	JSR mode7_raster_fx
 	JSR mode7_starfield_fx
 	JSR mode7_mirror_fx
 
@@ -332,7 +334,7 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 
 	CLC
 	LDA div3_table, Y			; char row = y DIV 3
-	ADC #1						; when negative need one more char row`
+	ADC #1						; when negative need one more char row
 	STA plot_diff_y
 
 	SEC
@@ -464,6 +466,231 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	.return
 	RTS
 }
+
+
+\\ TODO
+\\ Use correct sprite data for odd & even column alignment
+\\ Write 2x versions of routine for 1 & 2 row offsets
+\\ Implement safe clipping to edge of screen 
+.mode7_plot_stripe
+{
+	LDY #0
+	STY plot_diff_x
+	STY plot_stripe_prev
+
+	\\ Copy width and height in chars (bytes)
+	LDA (plot_ptr),Y
+	STA plot_char_w
+	STA plot_char_pitch				; store pitch
+	INY
+	LDA (plot_ptr),Y
+	STA plot_char_h
+	STA plot_diff_y
+
+	\\ Calculate x,y offset from coordinates
+	LDA plot_x
+	AND #1
+	STA plot_x_offset
+
+	\\ Calculate screen address from coordinates
+	LDA plot_x
+
+	\\ Clip left edge
+	BMI not_visible			; safe for now
+
+	\\ Convert to chars
+	LSR A
+	CLC
+	ADC #PLOT_origin_col
+	STA plot_char_x
+
+	\\ Clip right edge
+	CLC
+	ADC plot_char_w
+	CMP #MODE7_char_width
+	BCS not_visible
+
+	LDY plot_y
+
+	\\ Clip top edge
+	BPL is_visible			; safe for now
+
+	.not_visible
+	RTS
+
+	.is_visible
+	\\ Y char coordinate
+	LDA div3_table, Y
+	STA plot_char_y
+
+	\\ Clip bottom edge
+	CLC
+	ADC plot_char_h
+	CMP #MODE7_char_height
+	BCS not_visible
+
+	\\ Look up address of row from y coordinates
+	LDY plot_char_y
+	CLC
+	LDA mode7_row_addr_LO,Y
+	ADC plot_char_x
+	STA readptr
+	STA writeptr
+	LDA mode7_row_addr_HI,Y
+	ADC #0
+	STA readptr+1
+	STA writeptr+1
+
+	LDX #0
+
+	\\ Y offset
+	LDY plot_y
+	LDA mod3_table, Y
+	CMP #1
+	BEQ y_offset_1				; has (ptr),40 hardcoded
+	CMP #2
+	BEQ y_offset_2				; has (ptr),80 hardcoded - gah!
+
+	.x_loop
+
+	\\ New write ptr
+	LDA readptr
+	STA writeptr
+	LDA readptr+1
+	STA writeptr+1
+
+	.y_loop
+
+	\\ First character = 'aaaaaa'
+	\\ Load first byte 'aaaaaaaa'
+	LDA starstrp_even,X
+	STA plot_stripe_prev
+
+	\\ Top 6 bits 'aaaaaa'
+	LSR A: LSR A:TAY
+	LDA pixel_bits_to_mode7, Y
+
+	\\ Write char
+	LDY #0
+	STA (writeptr), Y
+
+	\\ Increment second byte 'bbbbbbbb'
+	INX
+	CPX plot_diff_y
+	BCS next_column
+
+	.y_offset_1						; enter with plot_stripe_byte = 0
+	\\ Second character = 'aabbbb'
+	\\ Load first byte 'aaaaaaaa'
+	LDA plot_stripe_prev
+
+	\\ Bottom 2 bits 'aa'
+	AND #&3
+	ASL A: ASL A: ASL A: ASL A
+	STA plot_stripe_byte
+
+	\\ Load second byte
+	LDA starstrp_even,X
+	STA plot_stripe_prev
+
+	\\ Top 4 bits 'bbbb'
+	AND #&F0
+	LSR A: LSR A: LSR A: LSR A
+
+	\\ Combine bits 'aabbbb'
+	ORA plot_stripe_byte: TAY
+	LDA pixel_bits_to_mode7, Y
+
+	\\ Write char
+	LDY #MODE7_char_width
+	STA (writeptr), Y
+
+	\\ Increment third byte 'cccccccc'
+	INX
+	CPX plot_diff_y
+	BCS next_column
+
+	.y_offset_2						; enter with plot_stripe_byte = 0
+	\\ Third character = 'bbbbcc'
+	\\ Load second byte again 'bbbbbbbb'
+	LDA plot_stripe_prev
+
+	\\ Bottom 4 bits 'bbbb'
+	AND #&0F
+	ASL A: ASL A
+	STA plot_stripe_byte
+
+	\\ Load third byte
+	LDA starstrp_even,X
+
+	\\ Top 2 bits 'cc'
+	LSR A: LSR A: LSR A: LSR A: LSR A: LSR A
+
+	\\ Combine bits 'bbbbcc'
+	ORA plot_stripe_byte: TAY
+	LDA pixel_bits_to_mode7, Y
+	
+	\\ Write char
+	LDY #MODE7_char_width*2
+	STA (writeptr), Y
+
+	\\ Fourth character = 'cccccc'
+	\\ Load third byte again 'cccccccc'
+	LDA starstrp_even,X
+
+	\\ Bottom 6 bits 'cccccc'
+	AND #&3F
+	TAY
+	LDA pixel_bits_to_mode7, Y
+	
+	\\ Write char
+	LDY #MODE7_char_width*3
+	STA (writeptr), Y
+
+	\\ Next byte
+	INX
+	CPX plot_diff_y
+	BCS next_column
+
+	\\ Update write ptr for next decoded chunk
+	{
+		CLC
+		LDA writeptr
+		ADC #MODE7_char_width * 4
+		STA writeptr
+		BCC no_carry
+		INC writeptr+1
+		.no_carry
+	}
+
+	JMP y_loop
+
+	.next_column
+	\\ Are we done yet?
+	DEC plot_char_w
+	BEQ return
+
+	\\ Index into sprite data that is the end of our column
+	CLC
+	LDA plot_diff_y
+	ADC plot_char_h
+	STA plot_diff_y
+
+	\\ Next column starts one byte across
+	{
+		INC readptr
+		BNE no_carry
+		INC readptr+1
+		.no_carry 
+	}
+
+	\\ Loop
+	JMP x_loop
+
+	.return
+	RTS
+}
+
 
 IF 0
 .mode7_erase_sprite
@@ -897,12 +1124,18 @@ FOR n, 0, STARS_num, 1
 	EQUB 1+RND(3)
 NEXT
 
+.pixel_bits_to_mode7
+FOR n, 0, 63, 1
+	EQUB 32 + ((n AND 1) * 64) + ((n AND 2) * 8) + ((n AND 4) * 2) + ((n AND 8) / 2) + ((n AND 16) / 8) + ((n AND 32) / 32)
+NEXT
+
 
 \ ******************************************************************
 \ *	Included data
 \ ******************************************************************
 
-INCLUDE "starhole.6502"
+;INCLUDE "starhole.6502"
+INCLUDE "starstrp.6502"
 
 \ ******************************************************************
 \ *	End address to be saved

@@ -66,6 +66,7 @@ int main(int argc, char **argv)
 	const char *label = cimg_option("-label", (char*)0, "Label");
 	const char *output_name = cimg_option("-o", (char*)0, "Output filename");
 	const bool mask = cimg_option("-mask", false, "Add mask data to output");
+	const bool stripe = cimg_option("-stripe", false, "Store sprite data in vertical stripes");
 
 	if (cimg_option("-h", false, 0)) std::exit(0);
 	if (input_name == NULL)  std::exit(0);
@@ -105,109 +106,197 @@ int main(int argc, char **argv)
 		fprintf(outfile, "\\\\ Input file '%s'\n", input_name);
 		fprintf(outfile, "\\\\ Image size=%dx%d pixels=%dx%d\n", src._width, src._height, pixel_width, pixel_height);
 		fprintf(outfile, ".%s\n", label);
-		fprintf(outfile, "EQUB %d, %d\t;char width, char height\n", char_width, char_height);
-		fprintf(outfile, ".%s_table\n", label);
+	}
 
-		for (int x_offset = 0; x_offset < 2; x_offset++)
+	if (stripe)
+	{
+		int byte_height = pixel_height / 4;
+
+		if (outfile)
 		{
-			for (int y_offset = 0; y_offset < 3; y_offset++)
+			fprintf(outfile, "EQUB %d, %d\t;char width, byte height\n", char_width, byte_height);
+			fprintf(outfile, ".%s_table\n", label);
+			fprintf(outfile, "EQUB LO(%s_even), HI(%s_even)\n", label, label);
+			fprintf(outfile, "EQUB LO(%s_odd), HI(%s_odd)\n", label, label);
+
+			fprintf(outfile, ".%s_even\n", label);
+
+			for (int x7 = 0; x7 < char_width; x7++)
 			{
-				fprintf(outfile, "EQUB LO(%s_char%d%d), HI(%s_char%d%d)\n", label, x_offset, y_offset, label, x_offset, y_offset);
+				int x = x7 * 2;
+
+				fprintf(outfile, "EQUB ");
+
+				for (int y = 0; y < pixel_height; y+=4)
+				{
+					unsigned char stripe_byte;
+
+					stripe_byte = (get_pixel_from_image(x, y, 0, 0) == 7 ? 128 : 0)
+						| (get_pixel_from_image(x + 1, y, 0, 0) == 7 ? 64 : 0)
+						| (get_pixel_from_image(x, y + 1, 0, 0) == 7 ? 32 : 0)
+						| (get_pixel_from_image(x + 1, y + 1, 0, 0) == 7 ? 16 : 0)
+						| (get_pixel_from_image(x, y + 2, 0, 0) == 7 ? 8 : 0)
+						| (get_pixel_from_image(x + 1, y + 2, 0, 0) == 7 ? 4 : 0)
+						| (get_pixel_from_image(x, y + 3, 0, 0) == 7 ? 2 : 0)
+						| (get_pixel_from_image(x + 1, y + 3, 0, 0) == 7 ? 1 : 0);
+
+					if (y != 0)
+					{
+						fprintf(outfile, ",");
+					}
+
+					fprintf(outfile, "%d", stripe_byte);
+				}
+
+				fprintf(outfile, "\n");
+			}
+
+			fprintf(outfile, ".%s_odd\n", label);
+
+			for (int x7 = 0; x7 < char_width; x7++)
+			{
+				int x = x7 * 2;
+
+				fprintf(outfile, "EQUB ");
+
+				for (int y = 0; y < pixel_height; y+=4)
+				{
+					unsigned char stripe_byte;
+
+					stripe_byte = (get_pixel_from_image(x, y, 1, 0) == 7 ? 128 : 0)
+						| (get_pixel_from_image(x + 1, y, 1, 0) == 7 ? 64 : 0)
+						| (get_pixel_from_image(x, y + 1, 1, 0) == 7 ? 32 : 0)
+						| (get_pixel_from_image(x + 1, y + 1, 1, 0) == 7 ? 16 : 0)
+						| (get_pixel_from_image(x, y + 2, 1, 0) == 7 ? 8 : 0)
+						| (get_pixel_from_image(x + 1, y + 2, 1, 0) == 7 ? 4 : 0)
+						| (get_pixel_from_image(x, y + 3, 1, 0) == 7 ? 2 : 0)
+						| (get_pixel_from_image(x + 1, y + 3, 1, 0) == 7 ? 1 : 0);
+
+					if (y != 0)
+					{
+						fprintf(outfile, ",");
+					}
+
+					fprintf(outfile, "%d", stripe_byte);
+				}
+
+				fprintf(outfile, "\n");
 			}
 		}
-
-		if (mask)
+	}
+	else
+	{
+		if (outfile)
 		{
-			fprintf(outfile, ".%s_masks\n", label);
+			fprintf(outfile, "EQUB %d, %d\t;char width, char height\n", char_width, char_height);
+			fprintf(outfile, ".%s_table\n", label);
 
 			for (int x_offset = 0; x_offset < 2; x_offset++)
 			{
 				for (int y_offset = 0; y_offset < 3; y_offset++)
 				{
-					fprintf(outfile, "EQUB LO(%s_mask%d%d), HI(%s_mask%d%d)\n", label, x_offset, y_offset, label, x_offset, y_offset);
+					fprintf(outfile, "EQUB LO(%s_char%d%d), HI(%s_char%d%d)\n", label, x_offset, y_offset, label, x_offset, y_offset);
+				}
+			}
+
+			if (mask)
+			{
+				fprintf(outfile, ".%s_masks\n", label);
+
+				for (int x_offset = 0; x_offset < 2; x_offset++)
+				{
+					for (int y_offset = 0; y_offset < 3; y_offset++)
+					{
+						fprintf(outfile, "EQUB LO(%s_mask%d%d), HI(%s_mask%d%d)\n", label, x_offset, y_offset, label, x_offset, y_offset);
+					}
+				}
+			}
+		}
+
+		for (int x_offset = 0; x_offset < 2; x_offset++)
+		{
+			for (int y_offset = 0; y_offset < 3; y_offset++)
+			{
+				printf("Offset [%d, %d]\n", x_offset, y_offset);
+
+				if (outfile)
+				{
+					fprintf(outfile, ".%s_char%d%d\n", label, x_offset, y_offset);
+				}
+
+				for (int y7 = 0; y7 < char_height; y7++)
+				{
+					if (outfile)
+					{
+						fprintf(outfile, "EQUB ");
+					}
+
+					for (int x7 = 0; x7 < char_width; x7++)
+					{
+						unsigned char gfx_char = get_graphic_char_from_image(x7, y7, x_offset, y_offset);
+
+						if (outfile)
+						{
+							if (x7 != 0)
+							{
+								fprintf(outfile, ",");
+							}
+							fprintf(outfile, "%d", gfx_char);		// , mask_char);
+						}
+					}
+
+					if (outfile)
+					{
+						fprintf(outfile, "\n");
+					}
+				}
+			}
+		}
+
+		for (int x_offset = 0; x_offset < 2; x_offset++)
+		{
+			for (int y_offset = 0; y_offset < 3; y_offset++)
+			{
+				printf("Offset [%d, %d]\n", x_offset, y_offset);
+
+				if (outfile)
+				{
+					fprintf(outfile, ".%s_mask%d%d\n", label, x_offset, y_offset);
+				}
+
+				for (int y7 = 0; y7 < char_height; y7++)
+				{
+					if (outfile)
+					{
+						fprintf(outfile, "EQUB ");
+					}
+
+					for (int x7 = 0; x7 < char_width; x7++)
+					{
+						unsigned char mask_char = get_mask_char_from_image(x7, y7, x_offset, y_offset);
+
+						if (outfile)
+						{
+							if (x7 != 0)
+							{
+								fprintf(outfile, ",");
+							}
+							fprintf(outfile, "%d", mask_char);		// , mask_char);
+						}
+					}
+
+					if (outfile)
+					{
+						fprintf(outfile, "\n");
+					}
 				}
 			}
 		}
 	}
 
-	for (int x_offset = 0; x_offset < 2; x_offset++)
+	if (outfile)
 	{
-		for (int y_offset = 0; y_offset < 3; y_offset++)
-		{
-			printf("Offset [%d, %d]\n", x_offset, y_offset);
-
-			if (outfile)
-			{
-				fprintf(outfile, ".%s_char%d%d\n", label, x_offset, y_offset);
-			}
-
-			for (int y7 = 0; y7 < char_height; y7++)
-			{
-				if (outfile)
-				{
-					fprintf(outfile, "EQUB ");
-				}
-
-				for (int x7 = 0; x7 < char_width; x7++)
-				{
-					unsigned char gfx_char = get_graphic_char_from_image(x7, y7, x_offset, y_offset);
-
-					if (outfile)
-					{
-						if (x7 != 0)
-						{
-							fprintf(outfile, ",");
-						}
-						fprintf(outfile, "%d", gfx_char);		// , mask_char);
-					}
-				}
-
-				if (outfile)
-				{
-					fprintf(outfile, "\n");
-				}
-			}
-		}
-	}
-
-	for (int x_offset = 0; x_offset < 2; x_offset++)
-	{
-		for (int y_offset = 0; y_offset < 3; y_offset++)
-		{
-			printf("Offset [%d, %d]\n", x_offset, y_offset);
-
-			if (outfile)
-			{
-				fprintf(outfile, ".%s_mask%d%d\n", label, x_offset, y_offset);
-			}
-
-			for (int y7 = 0; y7 < char_height; y7++)
-			{
-				if (outfile)
-				{
-					fprintf(outfile, "EQUB ");
-				}
-
-				for (int x7 = 0; x7 < char_width; x7++)
-				{
-					unsigned char mask_char = get_mask_char_from_image(x7, y7, x_offset, y_offset);
-
-					if (outfile)
-					{
-						if (x7 != 0)
-						{
-							fprintf(outfile, ",");
-						}
-						fprintf(outfile, "%d", mask_char);		// , mask_char);
-					}
-				}
-
-				if (outfile)
-				{
-					fprintf(outfile, "\n");
-				}
-			}
-		}
+		fclose(outfile);
 	}
 
 	return 0;

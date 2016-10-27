@@ -26,4 +26,14 @@
 - Colour raster bars
 
 
-w-(x+w-screen)=screen-x
+Better solution to 6x copies problem?
+Store 2x copies (for odd & even offset)
+But store data in vertical stripes, so one character width of data in correct arrangement per byte
+Then just need to map consecutive sequences of 6-bits from byte data to draw each character in a column
+3x bytes = 4x characters, can unroll this loop but only max 2x reads per character written to screen and
+less bit-twiddling.
+
+bitstream  : AAAAAAAA|BBBBBBBB|CCCCCCCC|
+y_offset=0 : aaaaaa|aabbbb|bbbbcc|cccccc
+y_offset=1 : 00aaaa|aaaabb|bbbbbb|cccccc|ccdddd
+y_offset=2 : 0000aa|aaaaaa|bbbbbb|bbcccc|ccccdd
