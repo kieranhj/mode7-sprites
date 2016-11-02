@@ -53,6 +53,7 @@ PLOT_origin_col = 4				; skip first 4 coloumns (col + newbg + col + sep)
 MODE7_texel_width = (MODE7_char_width - PLOT_origin_col) * 2
 MODE7_texel_height = MODE7_char_height * 3
 
+
 MIRROR_bottom_row = 24
 MIRROR_top_row = 22
 MIRROR_read_row = MIRROR_top_row - 1
@@ -86,8 +87,6 @@ GUARD &A0
 .plot_diff_x			SKIP 1
 .plot_diff_y			SKIP 1
 
-.plot_half_left			SKIP 1
-.plot_half_right		SKIP 1
 .plot_half_byte			SKIP 1
 .plot_half_x			SKIP 1
 
@@ -123,9 +122,11 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	JSR teletexel_init
 	JSR mode7_starfield_init
 
-	LDA #0
+	LDA #128
 	STA test_x
+	LDA #129
 	STA test_y
+	LDA #0
 	STA raster_idx
 
 	.loop
@@ -473,36 +474,138 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 {
 	\\ Zero any temporary variables
 	LDY #0
+	STY plot_diff_x
 
 	\\ Copy width and height in chars (bytes)
 	LDA (plot_ptr),Y
+	STA plot_char_pitch						; store pitch
+	SEC
+	SBC #1									; w = pitch - 1
 	STA plot_char_w
-	STA plot_char_pitch				; store pitch
 	INY
 	LDA (plot_ptr),Y
 	STA plot_char_h
 
-	\\ Character (x,y)
+	\\ X calcs
+
+	\\ Check X against right edge
+	LDA plot_x
+	BCC is_visible_right
+	
+	.not_visible
+	RTS
+
+	.is_visible_right
+	\\ Check X against left edge
+	BCS no_left_clip
+
+	\\ Check X+W against left edge
+	ADC plot_char_w
+	BCC not_visible
+
+	\\ Clip left side
+	\\ Don't need to set width as this is actually an index check
+	\\ But do need to specify index to look up into sprite data
+	SEC
+	SBC plot_x
+	STA plot_diff_x
+
+	\\ Set X to left edge
+	STA plot_x
+
+	.no_left_clip
+	\\ Check X+W against right edge
+	CLC
+	ADC plot_char_w
+	BCC no_right_clip
+
+	\\ Set width to right edge
+	\\ W = right edge - X
+	SBC plot_x
+	STA plot_char_w
+
+	.no_right_clip
+
+	\\ Character pos X
+	SEC
 	LDA plot_x
 	LSR A
-	CLC
-	ADC #PLOT_origin_col
 	STA plot_char_x
 
-	LDY plot_y
-	LDA div3_table, Y
-	STA plot_char_y
+	\\ Need sprite data here because Y clip will update sprite pointer
 
-	\\ (x,y) offset
+	\\ Read address start of sprite data - can get caller to set this?
+	CLC
+	LDA plot_ptr
+	ADC #2
+	STA readptr
+	LDA plot_ptr+1
+	ADC #0
+	STA readptr+1
+
+	\\ Convert texel coordinates to chars and clip in this space
+
+	\\ Y calcs
+	LDY plot_y
 	LDA mod3_table, Y
 	STA plot_y_offset
 
-	LDA plot_x
-	AND #&1
-	STA plot_x_offset
+	LDA div3_table, Y
+	STA plot_char_y
+
+	\\ Check char Y against bottom edge	
+	BCS not_visible
+
+	\\ Check char Y against top edge
+	BCS no_clip_top
+
+	\\ Check Y + H against top edge
+	ADC plot_char_h
+	BCC not_visible
+
+	\\ Clip against top edge
+	SEC
+	SBC plot_char_y
+	TAX
+
+	\\ Need to update start index into sprite data
+	.increment_top_row
+	{
+		CLC
+		LDA readptr
+		ADC plot_char_pitch				; CONST!
+		STA readptr
+		BCC no_carry
+		INC readptr+1
+		.no_carry
+	}
+
+	\\ And reduce number of rows left to actually plot
+	DEC plot_char_h
+
+	\\ H -= top edge - Y
+	DEX
+	BNE increment_top_row
+
+	\\ Set Y to top edge
+	STA plot_char_y
+
+	.no_clip_top
+	\\ Check Y + H against bottom edge
+	ADC plot_char_h
+	BCC no_bottom_clip
+	
+	\\ Set height to bottom edge
+	\\ H = bottom edge - Y
+	SBC plot_char_y
+	STA plot_char_h
+
+	.no_bottom_clip
 
 	\\ Calculate screen address from coordinates
-	LDY plot_char_y
+	SEC
+	LDA plot_char_y
+	TAY
 
 	\\ Look up address of row from y coordinates
 	CLC
@@ -516,26 +619,25 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	\\ Set up left & right side table indices - could pre-calc the shift
 	LDA plot_y_offset
 	ASL A: ASL A: ASL A: ASL A: ASL A: ASL A
-	STA plot_half_left
+	STA plot_half_left+1				; ** MODIFIES CODE		
 
 	ORA #&20
-	STA plot_half_right
-
-	\\ Read address start of sprite data - can get caller to set this
-	CLC
-	LDA plot_ptr
-	ADC #2
-	STA readptr
-	LDA plot_ptr+1
-	ADC #0
-	STA readptr+1
+	STA plot_half_right+1				; ** MODIFIES CODE
 
 	\\ Plot loop
 	.y_loop
-	LDX #0						; index across screen row
-	LDA plot_x_offset			
-	EOR #1
-	TAY							; index into sprite data
+	LDY plot_diff_x						; index into sprite data
+
+	LDX #0						
+	STX plot_half_x						; index across screen row
+	STX plot_half_byte
+
+	; BEQ start_right_half				; when plot_x & 1 
+	; BNE start_right_half				; when !plot_x & 1
+	\\ X offset
+	LDA plot_x							; CONST!
+	AND #1
+	BNE start_right_half
 
 	.x_loop
 	STX plot_half_x
@@ -544,7 +646,8 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	LDA (readptr), Y
 
 	\\ Turn this into MODE 7 gfx code for left column
-	ORA plot_half_left         ; where left_header = yy0 00000
+	.plot_half_left
+	ORA #&00         					; where left_header = yy0 00000 - ** SELF-MODIFIED CODE
 	TAX
 	LDA half_column_lookup, X
 
@@ -553,25 +656,28 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 
 	\\ Get right column of sprite data
 	INY
+
+	.start_right_half
 	LDA (readptr), Y
 
 	\\ Turn this into MODE 7 gfx code for right column
-	ORA plot_half_right        ; where right_header = yy1 00000
+	.plot_half_right
+	ORA #&20			        		; where right_header = yy1 00000 - ** SELF-MODIFIED CODE
 	TAX
 	LDA half_column_lookup, X
 
 	\\ Combine it with left column
-	ORA plot_half_byte         ; mask in other half
+	ORA plot_half_byte       			; mask in other half
 
 	\\ Write combined columns to screen	
 	LDX plot_half_x
 	.screen_write_addr
-	STA &7C00, X				; write to screen
+	STA &7C00, X						; write to screen - ** SELF-MODIFIED CODE
 	INX
 
 	\\ Have we reached end of columns?
 	INY
-	CPY plot_char_w
+	CPY plot_char_w						; CONST!
 	BCC x_loop
 
 	\\ Have we reached end of rows?
@@ -593,7 +699,7 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	{
 		CLC
 		LDA readptr
-		ADC plot_char_pitch
+		ADC plot_char_pitch				; CONST!
 		STA readptr
 		BCC no_carry
 		INC readptr+1
@@ -1011,11 +1117,11 @@ NEXT
 
 .mod3_table					; wasteful to have all 256 entries but safer for now
 FOR n, 0, 255, 1
-IF n < 128
+;IF n < 128
 	EQUB (n MOD 3)
-ELSE
-	EQUB (3-((256-n) MOD 3)) MOD 3	; 255=-1 -> 2, 254=-2 -> 1, 253=-3 -> 0, 252=-4 -> 2 etc.
-ENDIF
+;ELSE
+;	EQUB (3-((256-n) MOD 3)) MOD 3	; 255=-1 -> 2, 254=-2 -> 1, 253=-3 -> 0, 252=-4 -> 2 etc.
+;ENDIF
 NEXT
 
 .div3_table					; wasteful to have all 256 entries but safer for now

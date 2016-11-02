@@ -109,9 +109,9 @@ int main(int argc, char **argv)
 	{
 		fprintf(outfile, "EQUB ");
 
-		for (int x = -1; x < pixel_width - 1; x++)
+		for (int x = 0; x < pixel_width; x++)
 		{
-			if (x != -1)
+			if (x != 0)
 			{
 				fprintf(outfile, ",");
 			}
