@@ -53,6 +53,10 @@ PLOT_origin_col = 4				; skip first 4 coloumns (col + newbg + col + sep)
 MODE7_texel_width = (MODE7_char_width - PLOT_origin_col) * 2
 MODE7_texel_height = MODE7_char_height * 3
 
+HALF_left_edge_texels = 128 - (MODE7_texel_width / 2)
+HALF_right_edge_texels = 128 + (MODE7_texel_width / 2)
+HALF_top_edge_rows = (129 / 3) - ((MODE7_char_height - 3) / 2)
+HALF_bottom_edge_rows =(129 / 3) + ((MODE7_char_height - 3) / 2)
 
 MIRROR_bottom_row = 24
 MIRROR_top_row = 22
@@ -490,6 +494,7 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 
 	\\ Check X against right edge
 	LDA plot_x
+	CMP #HALF_right_edge_texels
 	BCC is_visible_right
 	
 	.not_visible
@@ -497,30 +502,36 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 
 	.is_visible_right
 	\\ Check X against left edge
+	CMP #HALF_left_edge_texels
 	BCS no_left_clip
 
 	\\ Check X+W against left edge
 	ADC plot_char_w
+	CMP #HALF_left_edge_texels + 1		; need an extra texel because we plot in 2 columns
 	BCC not_visible
 
 	\\ Clip left side
 	\\ Don't need to set width as this is actually an index check
 	\\ But do need to specify index to look up into sprite data
 	SEC
+	LDA #HALF_left_edge_texels
 	SBC plot_x
 	STA plot_diff_x
 
 	\\ Set X to left edge
+	LDA #HALF_left_edge_texels
 	STA plot_x
 
 	.no_left_clip
 	\\ Check X+W against right edge
 	CLC
 	ADC plot_char_w
+	CMP #HALF_right_edge_texels
 	BCC no_right_clip
 
 	\\ Set width to right edge
 	\\ W = right edge - X
+	LDA #HALF_right_edge_texels
 	SBC plot_x
 	STA plot_char_w
 
@@ -529,6 +540,7 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	\\ Character pos X
 	SEC
 	LDA plot_x
+	SBC #HALF_left_edge_texels - (PLOT_origin_col * 2)
 	LSR A
 	STA plot_char_x
 
@@ -554,17 +566,21 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	STA plot_char_y
 
 	\\ Check char Y against bottom edge	
+	CMP #HALF_bottom_edge_rows
 	BCS not_visible
 
 	\\ Check char Y against top edge
+	CMP #HALF_top_edge_rows
 	BCS no_clip_top
 
 	\\ Check Y + H against top edge
 	ADC plot_char_h
+	CMP #HALF_top_edge_rows + 1
 	BCC not_visible
 
 	\\ Clip against top edge
 	SEC
+	LDA #HALF_top_edge_rows
 	SBC plot_char_y
 	TAX
 
@@ -588,15 +604,18 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	BNE increment_top_row
 
 	\\ Set Y to top edge
+	LDA #HALF_top_edge_rows
 	STA plot_char_y
 
 	.no_clip_top
 	\\ Check Y + H against bottom edge
 	ADC plot_char_h
+	CMP #HALF_bottom_edge_rows + 1
 	BCC no_bottom_clip
 	
 	\\ Set height to bottom edge
 	\\ H = bottom edge - Y
+	LDA #HALF_bottom_edge_rows
 	SBC plot_char_y
 	STA plot_char_h
 
@@ -605,6 +624,7 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	\\ Calculate screen address from coordinates
 	SEC
 	LDA plot_char_y
+	SBC #HALF_top_edge_rows
 	TAY
 
 	\\ Look up address of row from y coordinates
@@ -634,6 +654,7 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 
 	; BEQ start_right_half				; when plot_x & 1 
 	; BNE start_right_half				; when !plot_x & 1
+
 	\\ X offset
 	LDA plot_x							; CONST!
 	AND #1
