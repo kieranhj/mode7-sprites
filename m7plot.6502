@@ -29,6 +29,7 @@ NOP_OP = $ea
 \ *	Define debug flags (prefer DEBUG_* naming?)
 \ ******************************************************************
 
+ENABLE_ERASE_STARS = FALSE
 
 \ ******************************************************************
 \ *	Define macros (prefer MACRO_* naming?)
@@ -78,21 +79,22 @@ GUARD &A0
 .test_x					SKIP 1
 .test_y					SKIP 1
 
-.plot_ptr				SKIP 2			; ptr to sprite data
+\\ Params are all preserved
 .plot_x					SKIP 1			; x coordinate in pixels
 .plot_y					SKIP 1			; y coordinate in pixels
-.plot_char_w			SKIP 1			; sprite width in chars
-.plot_char_h			SKIP 1			; sprite width in chars
-.plot_x_offset			SKIP 1			; sprite offset x
-.plot_y_offset			SKIP 1			; sprite offset y
+.plot_data_ptr			SKIP 2			; ptr to sprite data
+.plot_data_pitch		SKIP 1			; pitch of sprite data in bytes
+.plot_data_rows			SKIP 1			; number of rows of sprite data
+
+\\ Runtime vars used during plot call
+.plot_pixel_w			SKIP 1			; sprite width in chars
+.plot_row_count			SKIP 1			; number of rows to plot
 .plot_char_x			SKIP 1			; x position in chars absolute
 .plot_char_y			SKIP 1			; y position in chars absolute
-.plot_char_pitch		SKIP 1			; pitch of sprite data in chars
-.plot_diff_x			SKIP 1
-.plot_diff_y			SKIP 1
 
-.plot_half_byte			SKIP 1
-.plot_half_x			SKIP 1
+.plot_data_idx			SKIP 1			; start index into sprite data
+.plot_scr_idx			SKIP 1			; running index for screen write
+.plot_tmp_byte			SKIP 1			; used to combine sprite data
 
 .mirror_byte			SKIP 1
 .mirror_bit				SKIP 1
@@ -124,7 +126,9 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	\\ Turn off cursor!
 
 	JSR teletexel_init
+	IF ENABLE_ERASE_STARS	
 	JSR mode7_starfield_init
+	ENDIF
 
 	LDA #128
 	STA test_x
@@ -135,19 +139,11 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 
 	.loop
 
-	\\ Wait for vsync
+	\\ Wait for vsync - CAN DO BETTER THAN THIS!
 	LDA #19
 	JSR osbyte
 
-;	LDA test_x
-;	STA plot_x
-;	LDA test_y
-;	STA plot_y
-;	LDA #LO(starhole)
-;	STA plot_ptr
-;	LDA #HI(starhole)
-;	STA plot_ptr+1
-;	JSR mode7_erase_sprite
+	JSR mode7_erase_screen
 
 	\\ Check for Escape key
 	{
@@ -179,10 +175,14 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	STA plot_x
 	LDA test_y
 	STA plot_y
-	LDA #LO(starhalf)
-	STA plot_ptr
-	LDA #HI(starhalf)
-	STA plot_ptr+1
+	LDA #LO(starhalf_data)
+	STA plot_data_ptr
+	LDA #HI(starhalf_data)
+	STA plot_data_ptr+1
+	LDA #32
+	STA plot_data_pitch
+	LDA #11
+	STA plot_data_rows
 
 	JSR mode7_plot_half
 
@@ -249,246 +249,24 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 \ ******************************************************************
 \ *	Sprite plot routine
 \ * Want the interface to be something like:
-\ * Sprite data address = plot_ptr
+\ * Sprite data address = plot_data_ptr
 \ * X coordinate, Y coordinate = plot_x, plot_y
 \ ******************************************************************
-
-.mode7_plot_sprite
-{
-	\\ Zero any temporary variables
-	LDY #0
-	STY plot_diff_x
-	STY plot_diff_y
-
-	\\ Copy width and height in chars (bytes)
-	LDA (plot_ptr),Y
-	STA plot_char_w
-	STA plot_char_pitch				; store pitch
-	INY
-	LDA (plot_ptr),Y
-	STA plot_char_h
-
-	\\ Calculate x,y offset from coordinates
-	LDA plot_x
-	AND #1
-	STA plot_x_offset
-
-	\\ Calculate absolute x,y character pos from coordinates
-	LDA plot_x
-	BPL no_clip_left
-
-	\\ x < 0
-	\\ Make positive
-	EOR #&FF						; flip bits + 1
-	CLC
-	ADC #2							; add 1 as as need to correctly round to chars
-	LSR A							; div 2
-	STA plot_diff_x					; this is the diff to clip in chars
-
-	\\ Reduce width by diff			
-	SEC
-	LDA plot_char_w
-	SBC plot_diff_x					; could just add this
-	BPL visible_left				; w - x < 0 so plot position is off screen
-
-	.jump_not_visible
-	JMP not_visible					; stupid branch range
-	
-	.visible_left
-	STA plot_char_w
-
-	\\ Reset x
-	LDA #0							; x=0
-
-	.no_clip_left
-	LSR A							; relative
-	CLC
-	ADC #PLOT_origin_col			; make absolute
-	STA plot_char_x
-
-	\\ Check if not visible
-	CMP #MODE7_char_width
-	BCS jump_not_visible			; x > 40 so plot position is off screen
-
-	\\ Now test for right clip by adding width
-	CLC
-	ADC plot_char_w
-	CMP #MODE7_char_width
-	BCC no_clip_right
-
-	\\ Is over width of screen
-	; Carry set
-	LDA #MODE7_char_width
-	SBC plot_char_x
-	STA plot_char_w					; clip width = 40 - x
-
-	.no_clip_right
-
-	\\ Look up y coordinate
-	LDY plot_y
-
-	LDA mod3_table, Y
-	STA plot_y_offset
-
-	\\ y < 0?
-	TYA
-	BPL no_clip_top
-
-	\\ Make positive
-
-	EOR #&FF					; flip the bits +1 then -1
-	TAY
-
-	CLC
-	LDA div3_table, Y			; char row = y DIV 3
-	ADC #1						; when negative need one more char row`
-	STA plot_diff_y
-
-	SEC
-	LDA plot_char_h
-	SBC plot_diff_y				; subtract clipped character rows from height
-	STA plot_char_h
-
-	BEQ jump_not_visible		; if h <= 0 then not visible
-	BMI jump_not_visible
-
-	LDY #0
-
-	.no_clip_top
-	LDA div3_table, Y
-	STA plot_char_y
-
-	\\ Check if not visible off bottom
-	CMP #MODE7_char_height
-	BCS jump_not_visible			; y > 25 so plot position is off screen
-
-	\\ Now test for bottom clip by adding height
-	CLC
-	ADC plot_char_h
-	CMP #MODE7_char_height
-	BCC no_clip_bottom
-
-	\\ Is over height of screen
-	; Carry set
-	LDA #MODE7_char_height
-	SBC plot_char_y
-	STA plot_char_h					; clip height = 25 - y
-
-	.no_clip_bottom
-
-	\\ Calculate screen address from coordinates
-	LDY plot_char_y
-
-	\\ Look up address of row from y coordinates
-	CLC
-	LDA mode7_row_addr_LO,Y
-	ADC plot_char_x
-	STA store_screen_addr+1			; ** MODIFIES CODE
-	LDA mode7_row_addr_HI,Y
-	ADC #0
-	STA store_screen_addr+2			; ** MODIFIES CODE
-
-	\\ Locate sprite data = x_offset*6 + y_offset*2 - ick
-	CLC
-	LDA plot_x_offset
-	BEQ x_offset_zero
-	LDA #6							; 3x y offsets * 2x bytes
-	.x_offset_zero
-	ADC plot_y_offset
-	ADC plot_y_offset
-	ADC #2							; skip w & h bytes
-
-	TAY
-
-	\\ Then read off the data address LO & HI - mmph
-	CLC
-	LDA (plot_ptr),Y
-	ADC plot_diff_x					; offset into sprite data for clip
-	STA load_sprite_data+1
-	INY
-	LDA (plot_ptr),Y
-	STA load_sprite_data+2
-
-	\\ If we're clipped off the top we need to start from inside the sprite data
-	{
-		LDY plot_diff_y
-		.loop
-		BEQ done
-		CLC
-		LDA load_sprite_data+1
-		ADC plot_char_pitch
-		STA load_sprite_data+1
-		LDA load_sprite_data+2
-		ADC #0
-		STA load_sprite_data+2
-		DEY
-		BNE loop
-		.done
-	}
-
-	\\ Plot loop
-
-	\\ For each row
-	LDY plot_char_h
-	.y_loop
-
-	\\ Plot all chars
-	LDX #0							; start at left clip
-	.x_loop
-	CPX plot_char_w
-	BCS done_x_loop
-	.load_sprite_data
-	LDA end,X						; ** SELF-MODIFIED CODE
-	.store_screen_addr
-	STA &7C00,X						; ** SELF-MODIFIED CODE
-	INX
-	JMP x_loop
-
-	.done_x_loop
-	DEY
-	BEQ done_y_loop
-
-	\\ Next line
-	CLC
-	LDA store_screen_addr+1
-	ADC #MODE7_char_width			; screen pitch
-	STA store_screen_addr+1
-	LDA store_screen_addr+2
-	ADC #0
-	STA store_screen_addr+2
-	
-	\\ Next data - gah this is continuous
-	CLC
-	LDA load_sprite_data+1
-	ADC plot_char_pitch				; sprite pitch
-	STA load_sprite_data+1
-	LDA load_sprite_data+2
-	ADC #0
-	STA load_sprite_data+2
-
-	JMP y_loop
-	.done_y_loop
-	.not_visible
-
-	.return
-	RTS
-}
 
 .mode7_plot_half
 {
 	\\ Zero any temporary variables
 	LDY #0
-	STY plot_diff_x
+	STY plot_data_idx
 
-	\\ Copy width and height in chars (bytes)
-	LDA (plot_ptr),Y
-	STA plot_char_pitch						; store pitch
+	\\ Copy width in pixels and height in chars (bytes)
 	SEC
+	LDA plot_data_pitch
 	SBC #1									; w = pitch - 1
-	STA plot_char_w
-	INY
-	LDA (plot_ptr),Y
-	STA plot_char_h
+	STA plot_pixel_w
+
+	LDA plot_data_rows
+	STA plot_row_count
 
 	\\ X calcs
 
@@ -506,7 +284,7 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	BCS no_left_clip
 
 	\\ Check X+W against left edge
-	ADC plot_char_w
+	ADC plot_pixel_w
 	CMP #HALF_left_edge_texels + 1		; need an extra texel because we plot in 2 columns
 	BCC not_visible
 
@@ -516,7 +294,7 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	SEC
 	LDA #HALF_left_edge_texels
 	SBC plot_x
-	STA plot_diff_x
+	STA plot_data_idx
 
 	\\ Set X to left edge
 	LDA #HALF_left_edge_texels
@@ -525,7 +303,7 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	.no_left_clip
 	\\ Check X+W against right edge
 	CLC
-	ADC plot_char_w
+	ADC plot_pixel_w
 	CMP #HALF_right_edge_texels
 	BCC no_right_clip
 
@@ -533,7 +311,7 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	\\ W = right edge - X
 	LDA #HALF_right_edge_texels
 	SBC plot_x
-	STA plot_char_w
+	STA plot_pixel_w
 
 	.no_right_clip
 
@@ -547,12 +325,9 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	\\ Need sprite data here because Y clip will update sprite pointer
 
 	\\ Read address start of sprite data - can get caller to set this?
-	CLC
-	LDA plot_ptr
-	ADC #2
+	LDA plot_data_ptr
 	STA readptr
-	LDA plot_ptr+1
-	ADC #0
+	LDA plot_data_ptr+1
 	STA readptr+1
 
 	\\ Convert texel coordinates to chars and clip in this space
@@ -560,7 +335,7 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	\\ Y calcs
 	LDY plot_y
 	LDA mod3_table, Y
-	STA plot_y_offset
+	STA plot_y_offset + 1				; ** MODIFIES CODE
 
 	LDA div3_table, Y
 	STA plot_char_y
@@ -574,7 +349,7 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	BCS no_clip_top
 
 	\\ Check Y + H against top edge
-	ADC plot_char_h
+	ADC plot_row_count
 	CMP #HALF_top_edge_rows + 1
 	BCC not_visible
 
@@ -584,12 +359,14 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	SBC plot_char_y
 	TAX
 
+	\\ TODO - make this loop more optimal
+
 	\\ Need to update start index into sprite data
 	.increment_top_row
 	{
 		CLC
 		LDA readptr
-		ADC plot_char_pitch				; CONST!
+		ADC plot_data_pitch				; CONST!
 		STA readptr
 		BCC no_carry
 		INC readptr+1
@@ -597,7 +374,7 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	}
 
 	\\ And reduce number of rows left to actually plot
-	DEC plot_char_h
+	DEC plot_row_count
 
 	\\ H -= top edge - Y
 	DEX
@@ -609,7 +386,7 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 
 	.no_clip_top
 	\\ Check Y + H against bottom edge
-	ADC plot_char_h
+	ADC plot_row_count
 	CMP #HALF_bottom_edge_rows + 1
 	BCC no_bottom_clip
 	
@@ -617,7 +394,7 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	\\ H = bottom edge - Y
 	LDA #HALF_bottom_edge_rows
 	SBC plot_char_y
-	STA plot_char_h
+	STA plot_row_count
 
 	.no_bottom_clip
 
@@ -637,31 +414,40 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	STA screen_write_addr+2
 
 	\\ Set up left & right side table indices - could pre-calc the shift
-	LDA plot_y_offset
+	.plot_y_offset
+	LDA #0								; ** SELF-MODIFIED CODE
 	ASL A: ASL A: ASL A: ASL A: ASL A: ASL A
 	STA plot_half_left+1				; ** MODIFIES CODE		
 
 	ORA #&20
 	STA plot_half_right+1				; ** MODIFIES CODE
 
-	\\ Plot loop
-	.y_loop
-	LDY plot_diff_x						; index into sprite data
-
-	LDX #0						
-	STX plot_half_x						; index across screen row
-	STX plot_half_byte
-
-	; BEQ start_right_half				; when plot_x & 1 
-	; BNE start_right_half				; when !plot_x & 1
-
-	\\ X offset
+	\\ Determine x offset (0 or 1) start on left or right hand column of byte
+	LDX #&F0							; BEQ opcode
 	LDA plot_x							; CONST!
 	AND #1
-	BNE start_right_half
+	BNE x_offset_one
+	LDX #&D0							; BNE opcode
+	.x_offset_one
+	STX branch_right_half				; ** MODIFIES CODE
+
+	\\ Plot loop
+	.y_loop
+	LDY plot_data_idx					; index into sprite data
+
+	LDX #0						
+	STX plot_scr_idx						; index across screen row
+	STX plot_tmp_byte
+
+	\\ Relies on zero value above
+	\\ At the start of every row we always do left or right byte first
+	\\ So just poke the relevant branch instruction in beforehand
+	; BEQ start_right_half				; when plot_x & 1 == 1 (x_offset = 1) zero flag so always taken -> right
+	; BNE start_right_half				; when plot_x & 1 == 0 (x_offset = 0) zero flag so never taken -> left
+	.branch_right_half
+	BEQ start_right_half				; ** SELF-MODIFIED CODE
 
 	.x_loop
-	STX plot_half_x
 
 	\\ Get left column of sprite data
 	LDA (readptr), Y
@@ -673,7 +459,7 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	LDA half_column_lookup, X
 
 	\\ Store it
-	STA plot_half_byte
+	STA plot_tmp_byte					; could write into later code? (any saving?)
 
 	\\ Get right column of sprite data
 	INY
@@ -688,21 +474,22 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	LDA half_column_lookup, X
 
 	\\ Combine it with left column
-	ORA plot_half_byte       			; mask in other half
+	ORA plot_tmp_byte       			; mask in other half
 
 	\\ Write combined columns to screen	
-	LDX plot_half_x
+	LDX plot_scr_idx
 	.screen_write_addr
 	STA &7C00, X						; write to screen - ** SELF-MODIFIED CODE
 	INX
+	STX plot_scr_idx
 
 	\\ Have we reached end of columns?
 	INY
-	CPY plot_char_w						; CONST!
+	CPY plot_pixel_w					; CONST! - could be poked into memory for CPY #imm
 	BCC x_loop
 
 	\\ Have we reached end of rows?
-	DEC plot_char_h
+	DEC plot_row_count
 	BEQ return
 
 	\\ Next line on screen
@@ -720,7 +507,7 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	{
 		CLC
 		LDA readptr
-		ADC plot_char_pitch				; CONST!
+		ADC plot_data_pitch				; CONST!
 		STA readptr
 		BCC no_carry
 		INC readptr+1
@@ -738,11 +525,11 @@ IF 0
 {
 	\\ Copy width and height in chars (bytes)
 	LDY #0
-	LDA (plot_ptr),Y
-	STA plot_char_w
+	LDA (plot_data_ptr),Y
+	STA plot_pixel_w
 	INY
-	LDA (plot_ptr),Y
-	STA plot_char_h
+	LDA (plot_data_ptr),Y
+	STA plot_data_rows
 
 	\\ Calculate screen address from coordinates
 
@@ -772,7 +559,7 @@ IF 0
 	\\ Plot loop
 
 	\\ For each row
-	LDY plot_char_h
+	LDY plot_data_rows
 	.y_loop
 
 	\\ Plot all chars
@@ -782,7 +569,7 @@ IF 0
 	.store_screen_addr
 	STA &7C00,X						; ** SELF-MODIFIED CODE
 	INX
-	CPX plot_char_w
+	CPX plot_pixel_w
 	BNE x_loop
 
 	DEY
@@ -804,6 +591,19 @@ IF 0
 	RTS
 }
 ENDIF
+
+.mode7_erase_screen
+{
+	LDA #32
+	FOR y,0,21,1
+	FOR x,PLOT_origin_col,MODE7_char_width-1,1
+	STA MODE7_base_addr + (y * MODE7_char_width) + x
+	NEXT
+	NEXT
+
+	.return
+	RTS
+}
 
 \ ******************************************************************
 \ *	Mirror FX
@@ -1041,6 +841,7 @@ RASTER_row12_addr = (MODE7_base_addr + ((RASTER_centre_row+6) * MODE7_char_width
 
 STARS_row0_addr = (MODE7_base_addr + ((0) * MODE7_char_width))
 
+IF ENABLE_ERASE_STARS
 .mode7_starfield_init
 {
 	LDA #0
@@ -1054,6 +855,7 @@ STARS_row0_addr = (MODE7_base_addr + ((0) * MODE7_char_width))
 	.return
 	RTS
 }
+ENDIF
 
 .mode7_starfield_fx
 {
@@ -1066,12 +868,14 @@ STARS_row0_addr = (MODE7_base_addr + ((0) * MODE7_char_width))
 	.loop
 
 	\\ Erase old star
+	IF ENABLE_ERASE_STARS
 	LDA stars_table_byte,X
 	CMP #32
 	BNE no_erase
 	LDA stars_table_x,X
 	LSR A:LSR A:TAY:LDA #32
 	STA (writeptr),Y
+	ENDIF
 
 	.no_erase
 	\\ Update star x position based on speed & wrap
@@ -1089,7 +893,9 @@ STARS_row0_addr = (MODE7_base_addr + ((0) * MODE7_char_width))
 
 	\\ Is there something there already?
 	LDA (writeptr), Y
+	IF ENABLE_ERASE_STARS
 	STA stars_table_byte,X
+	ENDIF
 	CMP #32
 	BNE skip_write
 
@@ -1138,11 +944,7 @@ NEXT
 
 .mod3_table					; wasteful to have all 256 entries but safer for now
 FOR n, 0, 255, 1
-;IF n < 128
 	EQUB (n MOD 3)
-;ELSE
-;	EQUB (3-((256-n) MOD 3)) MOD 3	; 255=-1 -> 2, 254=-2 -> 1, 253=-3 -> 0, 252=-4 -> 2 etc.
-;ENDIF
 NEXT
 
 .div3_table					; wasteful to have all 256 entries but safer for now
@@ -1216,8 +1018,10 @@ INCLUDE "starhalf.6502"
 \ *	Space reserved for runtime buffers not preinitialised
 \ ******************************************************************
 
+IF ENABLE_ERASE_STARS
 .stars_table_byte
 SKIP STARS_num
+ENDIF
 
 ALIGN &100
 
