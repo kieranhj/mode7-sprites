@@ -14,6 +14,7 @@ osasci = &FFE3
 osbyte = &FFF4
 osword = &FFF1
 EVENTV = &0220
+IRQ1V = &204
 
 INKEY_esc = 112
 INKEY_w = 33
@@ -24,6 +25,8 @@ INKEY_d = 50
 SEI_OP = $78
 CLI_OP = $58
 NOP_OP = $ea
+BEQ_OP = &F0
+BNE_OP = &D0
 
 \ ******************************************************************
 \ *	Define debug flags (prefer DEBUG_* naming?)
@@ -101,6 +104,9 @@ GUARD &A0
 
 .raster_idx				SKIP 1
 
+.old_irqv				SKIP 2
+.double_buffer			SKIP 1
+
 \ ******************************************************************
 \ *	Start address to be saved
 \ ******************************************************************
@@ -123,12 +129,34 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	\\ Set MODE 7 for memory
 	LDA #22: JSR oswrch
 	LDA #7: JSR oswrch
-	\\ Turn off cursor!
 
+	\\ Turn off cursor!
+	LDA #23: JSR oswrch
+	LDA #1: JSR oswrch
+	LDA #0: JSR oswrch
+	LDA #0: JSR oswrch
+	LDA #0: JSR oswrch
+	LDA #0: JSR oswrch
+	LDA #0: JSR oswrch
+	LDA #0: JSR oswrch
+	LDA #0: JSR oswrch
+	LDA #0: JSR oswrch
+
+	\\ Initialise screen
+
+	LDA &FE34:AND #&4:STA &FE34		; normal RAM main memory
 	JSR teletexel_init
+
+	LDA &FE34:ORA #&4:STA &FE34		; shadow RAM main memory
+	JSR teletexel_init
+
+	\\ Initialise systems
+
 	IF ENABLE_ERASE_STARS	
 	JSR mode7_starfield_init
 	ENDIF
+
+	\\ Initialise vars
 
 	LDA #128
 	STA test_x
@@ -136,6 +164,21 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	STA test_y
 	LDA #0
 	STA raster_idx
+
+	\\ Shadow buffers
+	LDA #&1
+	STA double_buffer
+
+	\\ Enable irq
+	{
+		SEI
+		LDA IRQ1V:STA old_irqv
+		LDA IRQ1V+1:STA old_irqv+1
+	
+		LDA #LO(irq_handler):STA IRQ1V
+		LDA #HI(irq_handler):STA IRQ1V+1		; set interrupt handler
+		CLI
+	}
 
 	.loop
 
@@ -145,7 +188,7 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 
 	JSR mode7_erase_screen
 
-	\\ Check for Escape key
+	\\ Check for keys
 	{
 		LDA #121
 		LDX #0
@@ -194,7 +237,12 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 
 	\\ Until we finish
 	.exit
+	SEI
+	LDA old_irqv:STA IRQ1V
+	LDA old_irqv+1:STA IRQ1V+1		; set interrupt handler
+	CLI
 
+	.return
 	RTS
 }
 
@@ -247,10 +295,13 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 
 
 \ ******************************************************************
-\ *	Sprite plot routine
-\ * Want the interface to be something like:
+\ *	MODE 7 sprite plot routine
 \ * Sprite data address = plot_data_ptr
-\ * X coordinate, Y coordinate = plot_x, plot_y
+\ * X coordinate (128=centre) = plot_x
+\ * Y coordinate (129=centre) = plot_y
+\ * Sprite data pitch (row length in bytes) = plot_data_pitch
+\ * Number rows of sprite data = plot_data_rows
+\ * NB. These are preserved between calls so can be reused
 \ ******************************************************************
 
 .mode7_plot_half
@@ -423,98 +474,113 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	STA plot_half_right+1				; ** MODIFIES CODE
 
 	\\ Determine x offset (0 or 1) start on left or right hand column of byte
-	LDX #&F0							; BEQ opcode
+	LDX #BEQ_OP							; BEQ opcode
 	LDA plot_x							; CONST!
 	AND #1
 	BNE x_offset_one
-	LDX #&D0							; BNE opcode
+	LDX #BNE_OP							; BNE opcode
 	.x_offset_one
 	STX branch_right_half				; ** MODIFIES CODE
 
 	\\ Plot loop
 	.y_loop
-	LDY plot_data_idx					; index into sprite data
+	LDY plot_data_idx					; 3c - index into sprite data
 
-	LDX #0						
-	STX plot_scr_idx						; index across screen row
-	STX plot_tmp_byte
+	LDX #0								; 2c
+	STX plot_scr_idx					; 3c - index across screen row
+	STX plot_tmp_byte					; 3c
 
 	\\ Relies on zero value above
-	\\ At the start of every row we always do left or right byte first
+	\\ At the start of every row we always do left or right column of byte first
 	\\ So just poke the relevant branch instruction in beforehand
 	; BEQ start_right_half				; when plot_x & 1 == 1 (x_offset = 1) zero flag so always taken -> right
 	; BNE start_right_half				; when plot_x & 1 == 0 (x_offset = 0) zero flag so never taken -> left
 	.branch_right_half
-	BEQ start_right_half				; ** SELF-MODIFIED CODE
+	BEQ start_right_half				; 3c - ** SELF-MODIFIED CODE
 
 	.x_loop
 
 	\\ Get left column of sprite data
-	LDA (readptr), Y
+	LDA (readptr), Y					; 6c
 
 	\\ Turn this into MODE 7 gfx code for left column
 	.plot_half_left
 	ORA #&00         					; where left_header = yy0 00000 - ** SELF-MODIFIED CODE
-	TAX
-	LDA half_column_lookup, X
+	TAX									; 2c + 2c
+	LDA half_column_lookup, X			; 4c
 
 	\\ Store it
-	STA plot_tmp_byte					; could write into later code? (any saving?)
+	STA plot_tmp_byte					; 3c - could write into later code? (any saving?)
 
 	\\ Get right column of sprite data
-	INY
+	INY									; 2c
 
 	.start_right_half
-	LDA (readptr), Y
+	LDA (readptr), Y					; 6c
 
 	\\ Turn this into MODE 7 gfx code for right column
 	.plot_half_right
 	ORA #&20			        		; where right_header = yy1 00000 - ** SELF-MODIFIED CODE
-	TAX
-	LDA half_column_lookup, X
+	TAX									; 2c + 2c
+	LDA half_column_lookup, X			; 4c
 
 	\\ Combine it with left column
-	ORA plot_tmp_byte       			; mask in other half
+	ORA plot_tmp_byte       			; 3c - mask in other half
 
 	\\ Write combined columns to screen	
-	LDX plot_scr_idx
+	LDX plot_scr_idx					; 3c
 	.screen_write_addr
-	STA &7C00, X						; write to screen - ** SELF-MODIFIED CODE
-	INX
-	STX plot_scr_idx
+	STA &7C00, X						; 5c - write to screen - ** SELF-MODIFIED CODE
+
+	\\ For masked sprite would need:
+	\\ ORA &7C00, X						; 4c
+	\\ But also need to update both addresses in outer loop
+	
+	INX									; 2c
+	STX plot_scr_idx					; 3c
+
+	\\ ALT (mod code) ~= STA abs (4c) INC abs (6c) BCC (3c) = 13c vs 13c
 
 	\\ Have we reached end of columns?
-	INY
-	CPY plot_pixel_w					; CONST! - could be poked into memory for CPY #imm
-	BCC x_loop
+	INY									; 2c
+	CPY plot_pixel_w					; 3c - CONST! - could be poked into memory for CPY #imm
+	BCC x_loop							; 3c
+
+	\\ Cycle count = 57 per character byte written to screen
+	\\ E.g. 32 pixel width = 16 characters = 912 cycles minimum
 
 	\\ Have we reached end of rows?
-	DEC plot_row_count
-	BEQ return
+	DEC plot_row_count					; 5c
+	BEQ return							; 2c
 
 	\\ Next line on screen
 	{
-		CLC
-		LDA screen_write_addr+1
-		ADC #MODE7_char_width			; screen pitch
-		STA screen_write_addr+1
-		BCC no_carry
-		INC screen_write_addr+2
+		CLC								; 2c
+		LDA screen_write_addr+1			; 4c
+		ADC #MODE7_char_width			; 2c - screen pitch
+		STA screen_write_addr+1			; 4c
+		BCC no_carry					; 3c
+		INC screen_write_addr+2			; 6c
 		.no_carry
 	}
 
 	\\ Next line of sprite data - is contiguous but > 256 bytes 
 	{
-		CLC
-		LDA readptr
-		ADC plot_data_pitch				; CONST!
-		STA readptr
-		BCC no_carry
-		INC readptr+1
+		CLC								; 2c
+		LDA readptr						; 3c
+		ADC plot_data_pitch				; 3c - CONST!
+		STA readptr						; 3c
+		BCC no_carry					; 3c
+		INC readptr+1					; 5c
 		.no_carry
 	}
 	
-	JMP y_loop	
+	JMP y_loop							; 3c
+
+	\\ Cycle count = 64 overhead per character row written to screen
+	\\ E.g. 32 pixel height = 11 character rows = 704 cycles
+
+	\\ So overall 32 x 32 full sprite plot = ((57 * 16) + 64) * 11 = 10,736 cycles :S
 
 	.return
 	RTS
@@ -929,6 +995,42 @@ ENDIF
 }
 
 \ ******************************************************************
+\ * IRQ
+\ ******************************************************************
+
+.irq_handler
+{
+	LDA &FC
+	PHA
+
+	\\ Which interrupt?
+	LDA &FE4D
+	AND #2
+	BEQ return
+
+	\\ Acknowledge vsync interrupt
+;	STA &FE4D						; if we do this then *FX19 stops working!
+
+	\\ Set opposite buffers displayed & mapped
+	LDA &FE34						; set bit X = 1 -> shadow RAM mapped
+	AND #&FA						; set bit X = 0 -> normal RAM mapped
+	ORA double_buffer				; set bit D = 1 -> shadow RAM displayed
+	STA &FE34						; set bit D = 0 -> normal RAM displayed
+
+	\\ Flip buffers
+	LDA double_buffer
+	EOR #&5
+	STA double_buffer
+
+	.return
+	\\ Exit
+	PLA
+	STA &FC
+	JMP (old_irqv)		; RTI
+}
+
+
+\ ******************************************************************
 \ *	Look up tables
 \ ******************************************************************
 
@@ -942,21 +1044,6 @@ FOR n, 0, MODE7_char_height-1, 1
 EQUB HI(MODE7_base_addr + n * MODE7_char_width)
 NEXT
 
-.mod3_table					; wasteful to have all 256 entries but safer for now
-FOR n, 0, 255, 1
-	EQUB (n MOD 3)
-NEXT
-
-.div3_table					; wasteful to have all 256 entries but safer for now
-FOR n, 0, 255, 1
-	EQUB (n DIV 3)
-NEXT
-
-.raster_y_table				; don't need 256 entries but easier for now
-FOR n, 0, 255, 1
-	EQUB RASTER_centre_row + RASTER_wave_rows * SIN(PI * n / 128)
-NEXT
-
 .stars_table_x
 FOR n, 0, STARS_num, 1
 	EQUB RND(MODE7_texel_width * 2)
@@ -967,6 +1054,19 @@ FOR n, 0, STARS_num, 1
 	EQUB 1+RND(3)
 NEXT
 
+ALIGN &100
+.mod3_table					; wasteful to have all 256 entries but safer for now
+FOR n, 0, 255, 1
+	EQUB (n MOD 3)
+NEXT
+
+ALIGN &100
+.div3_table					; wasteful to have all 256 entries but safer for now
+FOR n, 0, 255, 1
+	EQUB (n DIV 3)
+NEXT
+
+ALIGN &100
 .half_column_lookup
 FOR n, 0, 192, 1
 	a = n AND 1
@@ -1000,6 +1100,12 @@ FOR n, 0, 192, 1
 
 	ENDIF
 NEXT
+
+.raster_y_table				; don't need 256 entries but easier for now
+FOR n, 0, 255, 1
+	EQUB RASTER_centre_row + RASTER_wave_rows * SIN(PI * n / 128)
+NEXT
+
 
 \ ******************************************************************
 \ *	Included data
