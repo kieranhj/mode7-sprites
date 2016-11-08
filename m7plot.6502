@@ -32,7 +32,9 @@ BNE_OP = &D0
 \ *	Define debug flags (prefer DEBUG_* naming?)
 \ ******************************************************************
 
-ENABLE_ERASE_STARS = FALSE
+ENABLE_ERASE_STARS = TRUE
+ENABLE_DOUBLE_BUFFER = FALSE
+ENABLE_CLEAR_SCREEN = FALSE
 
 \ ******************************************************************
 \ *	Define macros (prefer MACRO_* naming?)
@@ -144,10 +146,13 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 
 	\\ Initialise screen
 
+	IF ENABLE_DOUBLE_BUFFER
 	LDA &FE34:AND #&4:STA &FE34		; normal RAM main memory
 	JSR teletexel_init
 
 	LDA &FE34:ORA #&4:STA &FE34		; shadow RAM main memory
+	ENDIF
+
 	JSR teletexel_init
 
 	\\ Initialise systems
@@ -186,7 +191,9 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	LDA #19
 	JSR osbyte
 
+	IF ENABLE_CLEAR_SCREEN
 	JSR mode7_erase_screen
+	ENDIF
 
 	\\ Check for keys
 	{
@@ -218,13 +225,13 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	STA plot_x
 	LDA test_y
 	STA plot_y
-	LDA #LO(starhalf_data)
+	LDA #LO(font33_data)
 	STA plot_data_ptr
-	LDA #HI(starhalf_data)
+	LDA #HI(font33_data)
 	STA plot_data_ptr+1
-	LDA #32
+	LDA #16
 	STA plot_data_pitch
-	LDA #11
+	LDA #6
 	STA plot_data_rows
 
 	JSR mode7_plot_half
@@ -658,6 +665,7 @@ IF 0
 }
 ENDIF
 
+IF ENABLE_CLEAR_SCREEN
 .mode7_erase_screen
 {
 	LDA #32
@@ -670,6 +678,7 @@ ENDIF
 	.return
 	RTS
 }
+ENDIF
 
 \ ******************************************************************
 \ *	Mirror FX
@@ -1012,15 +1021,17 @@ ENDIF
 ;	STA &FE4D						; if we do this then *FX19 stops working!
 
 	\\ Set opposite buffers displayed & mapped
+	IF ENABLE_DOUBLE_BUFFER
 	LDA &FE34						; set bit X = 1 -> shadow RAM mapped
 	AND #&FA						; set bit X = 0 -> normal RAM mapped
 	ORA double_buffer				; set bit D = 1 -> shadow RAM displayed
 	STA &FE34						; set bit D = 0 -> normal RAM displayed
-
+	
 	\\ Flip buffers
 	LDA double_buffer
 	EOR #&5
 	STA double_buffer
+	ENDIF
 
 	.return
 	\\ Exit
@@ -1111,7 +1122,7 @@ NEXT
 \ *	Included data
 \ ******************************************************************
 
-INCLUDE "starhalf.6502"
+INCLUDE "font.6502"
 
 \ ******************************************************************
 \ *	End address to be saved
