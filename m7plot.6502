@@ -35,6 +35,7 @@ BNE_OP = &D0
 ENABLE_ERASE_STARS = TRUE
 ENABLE_DOUBLE_BUFFER = FALSE
 ENABLE_CLEAR_SCREEN = TRUE
+ENABLE_KEY_SPRITE = FALSE
 
 \ ******************************************************************
 \ *	Define macros (prefer MACRO_* naming?)
@@ -69,7 +70,7 @@ MIRROR_top_row = 22
 MIRROR_read_row = MIRROR_top_row - 1
 
 STARS_num = 22
-
+DRAW_timer_ms = 29 * 8 * 64				; not sure exactly how MODE 7 is timed but we'll find out :)
 
 \ ******************************************************************
 \ *	Define fast (zero page) runtime variables
@@ -108,13 +109,16 @@ GUARD &A0
 
 .scrtext_col			SKIP 1
 .scrtext_idx			SKIP 1
+.scrtext_y_idx			SKIP 1
+
 .scrtext_x_offset		SKIP 1
-.scrtext_row			SKIP 1
 
 .scrtext_tmp_idx		SKIP 1
+.scrtext_tmp_y			SKIP 1
 
 .old_irqv				SKIP 2
 .double_buffer			SKIP 1
+.draw_signal			SKIP 1
 
 \ ******************************************************************
 \ *	Start address to be saved
@@ -160,7 +164,8 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	LDA &FE34:ORA #&4:STA &FE34		; shadow RAM main memory
 	ENDIF
 
-	JSR teletexel_init
+	JSR teletext_init
+	JSR teletext_set
 
 	\\ Initialise systems
 
@@ -182,9 +187,21 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	LDA #&1
 	STA double_buffer
 
+	LDA #0
+	STA draw_signal
+
 	\\ Enable irq
 	{
 		SEI
+		LDA #&7F					; A=01111111
+		STA &FE4E					; R14=Interrupt Enable (disable all interrupts)
+		
+		LDA #&C2					; A=11000010
+		STA &FE4E					; R14=Interrupt Enable (enable main_vsync and timer interrupt)
+		
+		LDA #0						; A=00000000
+		STA &FE4B					; R11=Auxillary Control Register (timer 1 one shot mode)
+
 		LDA IRQ1V:STA old_irqv
 		LDA IRQ1V+1:STA old_irqv+1
 	
@@ -196,13 +213,19 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	.loop
 
 	\\ Wait for vsync - CAN DO BETTER THAN THIS!
-	LDA #19
-	JSR osbyte
+	LDA draw_signal
+	.wait_for_signal
+	CMP draw_signal
+	BEQ wait_for_signal
+
+;	LDA #19
+;	JSR osbyte
 
 	IF ENABLE_CLEAR_SCREEN
 	JSR mode7_erase_screen
 	ENDIF
 
+	IF ENABLE_KEY_SPRITE
 	\\ Check for keys
 	{
 		LDA #121
@@ -242,11 +265,13 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	LDA #6
 	STA plot_data_rows
 
-;	JSR mode7_plot_half
-	JSR scrtext_poll
+	JSR mode7_plot_half
+	ENDIF
 
-;	JSR mode7_raster_fx
+	JSR scrtext_poll
+	JSR mode7_raster_fx
 	JSR mode7_starfield_fx
+	JSR teletext_poll
 	JSR mode7_mirror_fx
 
 	JMP loop
@@ -262,53 +287,123 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	RTS
 }
 
-.teletexel_init
+
+\ ******************************************************************
+\ *	Teletext Attribute Handler
+\ ******************************************************************
+
+.teletext_init
 {
-	LDX #0
-
-	.loop
-	LDA mode7_row_addr_LO,X
-	STA writeptr
-	LDA mode7_row_addr_HI,X
-	STA writeptr+1
-	
 	LDY #0
+	.loop
+	LDA #0
+	STA teletext_bg_col, Y
 
-	CPX #MIRROR_top_row
-	BCC not_mirror
-	LDA #MODE7_graphic_black + 4
-	STA (writeptr),Y
+	LDA #7
+	STA teletext_fg_col, Y
 
-	INY
-	LDA #MODE7_new_bg
-	STA (writeptr),Y
-	BNE done_mirror
-
-	.not_mirror
-	LDA #MODE7_graphic_black + 7
-	STA (writeptr),Y
-
-	INY
-	LDA #MODE7_black_bg
-	STA (writeptr),Y
-	
-	.done_mirror
-	INY
 	LDA #MODE7_contiguous
-	STA (writeptr),Y
+	STA teletext_fx, Y
 
 	INY
-	LDA #MODE7_graphic_black + 7
-	STA (writeptr),Y
-
-	INX
-	CPX #MODE7_char_height
+	CPY #MIRROR_top_row
 	BCC loop
+
+	.mirror_loop
+	LDA #4
+	STA teletext_bg_col, Y
+
+	LDA #7
+	STA teletext_fg_col, Y
+
+	LDA #MODE7_separated
+	STA teletext_fx, Y
+
+	INY
+	CPY #MODE7_char_height
+	BCC mirror_loop
 
 	.return
 	RTS
 }
 
+.teletext_poll
+{
+	CLC
+
+	\\ Do fg colour
+	FOR y,0,MIRROR_top_row-1,1
+	LDA teletext_fg_col + y
+	ADC #MODE7_graphic_black
+	STA MODE7_base_addr + (y * MODE7_char_width) + 3
+	NEXT
+
+	\\ Do fx char
+	FOR y,0,MIRROR_top_row-1,1
+	LDA teletext_fx + y
+	STA MODE7_base_addr + (y * MODE7_char_width) + 2
+	NEXT
+
+	\\ Do bg col
+	LDX #MODE7_black_bg
+	LDY #MODE7_new_bg
+
+	FOR y,0,MIRROR_top_row-1,1
+	{
+		LDA teletext_bg_col + y
+		BEQ black
+
+		\\ Colour
+		ADC #MODE7_graphic_black
+		STA MODE7_base_addr + (y * MODE7_char_width) + 0
+		STY MODE7_base_addr + (y * MODE7_char_width) + 1
+		BNE done
+
+		.black
+		STX MODE7_base_addr + (y * MODE7_char_width) + 1
+
+		.done
+	}
+	NEXT
+
+	.return
+	RTS
+}
+
+.teletext_set
+{
+	JSR teletext_poll
+
+	\\ Do fg colour
+	FOR y,MIRROR_top_row,MODE7_char_height-1,1
+	LDA teletext_fg_col + y
+	ADC #MODE7_graphic_black
+	STA MODE7_base_addr + (y * MODE7_char_width) + 3
+	NEXT
+
+	\\ Do fx char
+	FOR y,MIRROR_top_row,MODE7_char_height-1,1
+	LDA teletext_fx + y
+	STA MODE7_base_addr + (y * MODE7_char_width) + 2
+	NEXT
+
+	\\ Do bg col
+	LDY #MODE7_new_bg
+
+	FOR y,MIRROR_top_row,MODE7_char_height-1,1
+	{
+		LDA teletext_bg_col + y
+
+		\\ Colour
+		ADC #MODE7_graphic_black
+		STA MODE7_base_addr + (y * MODE7_char_width) + 0
+		STY MODE7_base_addr + (y * MODE7_char_width) + 1
+	}
+	NEXT
+
+	.return
+	RTS
+}
 
 \ ******************************************************************
 \ *	MODE 7 sprite plot routine
@@ -483,7 +578,7 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	\\ Set up left & right side table indices - could pre-calc the shift
 	.plot_y_offset
 	LDA #0								; ** SELF-MODIFIED CODE
-	ASL A: ASL A: ASL A: ASL A: ASL A: ASL A
+;	ASL A: ASL A: ASL A: ASL A: ASL A: ASL A	; now pre-shifted
 ;	CLC: ROR A: ROR A: ROR A			; or can be pre-shifted
 	STA plot_half_left+1				; ** MODIFIES CODE		
 
@@ -675,11 +770,16 @@ IF 0
 }
 ENDIF
 
+
+\ ******************************************************************
+\ *	Clear screen FX
+\ ******************************************************************
+
 IF ENABLE_CLEAR_SCREEN
 .mode7_erase_screen
 {
 	LDA #32
-	FOR y,12,17,1			; 0,22
+	FOR y,10,21,1			; 0,22
 	FOR x,PLOT_origin_col,MODE7_char_width-1,1
 	STA MODE7_base_addr + (y * MODE7_char_width) + x
 	NEXT
@@ -689,6 +789,7 @@ IF ENABLE_CLEAR_SCREEN
 	RTS
 }
 ENDIF
+
 
 \ ******************************************************************
 \ *	Mirror FX
@@ -796,124 +897,85 @@ MIRROR_write_row2_addr = (MODE7_base_addr + ((MIRROR_top_row+2) * MODE7_char_wid
 
 RASTER_centre_row = 11
 RASTER_wave_rows = 6
-RASTER_table_inc = 8
-RASTER_row0_addr = (MODE7_base_addr + ((RASTER_centre_row-6) * MODE7_char_width))
-RASTER_row1_addr = (MODE7_base_addr + ((RASTER_centre_row-5) * MODE7_char_width))
-RASTER_row2_addr = (MODE7_base_addr + ((RASTER_centre_row-4) * MODE7_char_width))
-RASTER_row3_addr = (MODE7_base_addr + ((RASTER_centre_row-3) * MODE7_char_width))
-RASTER_row4_addr = (MODE7_base_addr + ((RASTER_centre_row-2) * MODE7_char_width))
-RASTER_row5_addr = (MODE7_base_addr + ((RASTER_centre_row-1) * MODE7_char_width))
-RASTER_row6_addr = (MODE7_base_addr + ((RASTER_centre_row-0) * MODE7_char_width))
-RASTER_row7_addr = (MODE7_base_addr + ((RASTER_centre_row+1) * MODE7_char_width))
-RASTER_row8_addr = (MODE7_base_addr + ((RASTER_centre_row+2) * MODE7_char_width))
-RASTER_row9_addr = (MODE7_base_addr + ((RASTER_centre_row+3) * MODE7_char_width))
-RASTER_row10_addr = (MODE7_base_addr + ((RASTER_centre_row+4) * MODE7_char_width))
-RASTER_row11_addr = (MODE7_base_addr + ((RASTER_centre_row+5) * MODE7_char_width))
-RASTER_row12_addr = (MODE7_base_addr + ((RASTER_centre_row+6) * MODE7_char_width))
+RASTER_table_inc = 64
 
 .mode7_raster_fx
 {
-	LDA #MODE7_black_bg
-	STA RASTER_row0_addr+1
-	STA RASTER_row1_addr+1
-	STA RASTER_row2_addr+1
-	STA RASTER_row3_addr+1
-	STA RASTER_row4_addr+1
-	STA RASTER_row5_addr+1
-	STA RASTER_row6_addr+1
-	STA RASTER_row7_addr+1
-	STA RASTER_row8_addr+1
-	STA RASTER_row9_addr+1
-	STA RASTER_row10_addr+1
-	STA RASTER_row11_addr+1
-	STA RASTER_row12_addr+1
+	\\ Clear our old bar
+	LDX raster_idx
+	LDY raster_y_table, X
+
+	LDA #0
+	STA teletext_bg_col, Y
+	STA teletext_bg_col+1, Y
+	STA teletext_bg_col+2, Y
+
+	TXA
+	ADC #RASTER_table_inc
+	TAX
+	LDY raster_y_table, X
+
+	LDA #0
+	STA teletext_bg_col, Y
+	STA teletext_bg_col+1, Y
+	STA teletext_bg_col+2, Y
+	
+	TXA
+	ADC #RASTER_table_inc
+	TAX
+	LDY raster_y_table, X
+
+	LDA #0
+	STA teletext_bg_col, Y
+	STA teletext_bg_col+1, Y
+	STA teletext_bg_col+2, Y
+
 
 	LDX raster_idx
-	LDA raster_y_table, X
-	TAY
-	LDA mode7_row_addr_LO,Y
-	STA writeptr
-	LDA mode7_row_addr_HI,Y
-	STA writeptr+1
-	LDY #0
-	LDA #MODE7_graphic_black + 1
-	STA (writeptr),Y
-	INY
-	LDA #MODE7_new_bg
-	STA (writeptr),Y
+	INX
+	INX
+	STX raster_idx
+	
+	LDY raster_y_table, X
+	LDA #1
+	ORA teletext_bg_col, Y
+	STA teletext_bg_col, Y
+	LDA #1
+	ORA teletext_bg_col+1, Y
+	STA teletext_bg_col+1, Y
+	LDA #1
+	ORA teletext_bg_col+2, Y
+	STA teletext_bg_col+2, Y
 
-	TXA:CLC:ADC #RASTER_table_inc:TAX
-	LDA raster_y_table, X
-	TAY
-	LDA mode7_row_addr_LO,Y
-	STA writeptr
-	LDA mode7_row_addr_HI,Y
-	STA writeptr+1
-	LDY #0
-	LDA #MODE7_graphic_black + 2
-	STA (writeptr),Y
-	INY
-	LDA #MODE7_new_bg
-	STA (writeptr),Y
+	TXA
+	ADC #RASTER_table_inc
+	TAX
+	LDY raster_y_table, X
 
-	TXA:CLC:ADC #RASTER_table_inc:TAX
-	LDA raster_y_table, X
-	TAY
-	LDA mode7_row_addr_LO,Y
-	STA writeptr
-	LDA mode7_row_addr_HI,Y
-	STA writeptr+1
-	LDY #0
-	LDA #MODE7_graphic_black + 3
-	STA (writeptr),Y
-	INY
-	LDA #MODE7_new_bg
-	STA (writeptr),Y
+	LDA #2
+	ORA teletext_bg_col, Y
+	STA teletext_bg_col, Y
+	LDA #2
+	ORA teletext_bg_col+1, Y
+	STA teletext_bg_col+1, Y
+	LDA #2
+	ORA teletext_bg_col+2, Y
+	STA teletext_bg_col+2, Y
+	
+	TXA
+	ADC #RASTER_table_inc
+	TAX
+	LDY raster_y_table, X
 
-	TXA:CLC:ADC #RASTER_table_inc:TAX
-	LDA raster_y_table, X
-	TAY
-	LDA mode7_row_addr_LO,Y
-	STA writeptr
-	LDA mode7_row_addr_HI,Y
-	STA writeptr+1
-	LDY #0
-	LDA #MODE7_graphic_black + 4
-	STA (writeptr),Y
-	INY
-	LDA #MODE7_new_bg
-	STA (writeptr),Y
-
-	TXA:CLC:ADC #RASTER_table_inc:TAX
-	LDA raster_y_table, X
-	TAY
-	LDA mode7_row_addr_LO,Y
-	STA writeptr
-	LDA mode7_row_addr_HI,Y
-	STA writeptr+1
-	LDY #0
-	LDA #MODE7_graphic_black + 5
-	STA (writeptr),Y
-	INY
-	LDA #MODE7_new_bg
-	STA (writeptr),Y
-
-	TXA:CLC:ADC #RASTER_table_inc:TAX
-	LDA raster_y_table, X
-	TAY
-	LDA mode7_row_addr_LO,Y
-	STA writeptr
-	LDA mode7_row_addr_HI,Y
-	STA writeptr+1
-	LDY #0
-	LDA #MODE7_graphic_black + 6
-	STA (writeptr),Y
-	INY
-	LDA #MODE7_new_bg
-	STA (writeptr),Y
-
-	INC raster_idx
-	INC raster_idx
+	LDA #4
+	ORA teletext_bg_col, Y
+	STA teletext_bg_col, Y
+	LDA #4
+	ORA teletext_bg_col+1, Y
+	STA teletext_bg_col+1, Y
+	LDA #4
+	ORA teletext_bg_col+2, Y
+	STA teletext_bg_col+2, Y
 
 	.return
 	RTS
@@ -929,7 +991,7 @@ STARS_row0_addr = (MODE7_base_addr + ((0) * MODE7_char_width))
 IF ENABLE_ERASE_STARS
 .mode7_starfield_init
 {
-	LDA #0
+	LDA #32
 
 	LDY #STARS_num-1
 	.loop
@@ -954,11 +1016,17 @@ ENDIF
 
 	\\ Erase old star
 	IF ENABLE_ERASE_STARS
+	CPX #10
+	BCS no_erase			; only erase top 10 lines as scrolltext blats this anyway
+
 	LDA stars_table_byte,X
 	CMP #32
 	BNE no_erase
+	
 	LDA stars_table_x,X
-	LSR A:LSR A:TAY:LDA #32
+	LSR A:LSR A:TAY
+	
+	LDA #32
 	STA (writeptr),Y
 	ENDIF
 
@@ -1025,10 +1093,10 @@ ENDIF
 	\\ Which interrupt?
 	LDA &FE4D
 	AND #2
-	BEQ return
+	BEQ is_timer1
 
 	\\ Acknowledge vsync interrupt
-;	STA &FE4D						; if we do this then *FX19 stops working!
+	STA &FE4D						; if we do this then *FX19 stops working!
 
 	\\ Set opposite buffers displayed & mapped
 	IF ENABLE_DOUBLE_BUFFER
@@ -1043,11 +1111,19 @@ ENDIF
 	STA double_buffer
 	ENDIF
 
+	\\ Set our draw timer
+	LDA #LO(DRAW_timer_ms):STA &FE44
+	LDA #HI(DRAW_timer_ms):STA &FE45
+
+	.is_timer1
+	LDA #&40:STA &FE4D
+	INC draw_signal
+
 	.return
 	\\ Exit
 	PLA
 	STA &FC
-	JMP (old_irqv)		; RTI
+	RTI
 }
 
 
@@ -1060,6 +1136,7 @@ ENDIF
 	LDA #0
 	STA scrtext_col
 	STA scrtext_idx
+	STA scrtext_y_idx
 
 	.return
 	RTS
@@ -1083,6 +1160,13 @@ ENDIF
 	\\ First character column
 	LDA #PLOT_origin_col
 	STA plot_char_x
+
+	LDA scrtext_y_idx
+	STA scrtext_tmp_y
+
+	INC scrtext_y_idx
+	INC scrtext_y_idx
+	INC scrtext_y_idx
 
 	\\ Get message character index
 	LDY scrtext_idx
@@ -1112,37 +1196,45 @@ ENDIF
 	.char_x_loop
 
 	\\ Get texel y for this column
-	LDY #36								; plot_y
+	LDY scrtext_tmp_y					; 3c
+	INY									; 2c
+	INY
+	STY scrtext_tmp_y					; 3c
+
+	LDA scrtext_y_table, Y				; 4c - could increment this address directly
+	TAY									; 2c
 
 	\\ Get y offset
-	LDA mod3_table, Y
-
-	CLC: ROR A: ROR A: ROR A			; or can be pre-shifted
-	ORA scrtext_x_offset
-	STA scrtext_y_offset + 1			; ** MODIFIES CODE
+	LDA mod3_table, Y					; 4c
+;	CLC: ROR A: ROR A: ROR A			; now pre-shifted
+	ORA scrtext_x_offset				; 3c
+	STA scrtext_y_offset + 1			; 4c - ** MODIFIES CODE
 
 	\\ Get char y
-	LDA div3_table, Y
-	TAY
+	LDA div3_table, Y					; 4c - could go straight from texel Y to screen address
+	TAY									; 2c
 
 	\\ Write address to screen
-	CLC
-	LDA mode7_row_addr_LO, Y
-	ADC plot_char_x
-	STA writeptr
-	LDA mode7_row_addr_HI, Y
-	ADC #0
-	STA writeptr+1
+	CLC									; 2c
+	LDA mode7_row_addr_LO, Y			; 4c
+	ADC plot_char_x						; 3c
+	STA writeptr						; 3c
+	LDA mode7_row_addr_HI, Y			; 4c
+	ADC #0								; 2c
+	STA writeptr+1						; 3c
 
 	\\ Copy a column of sprite data
-	LDY #0
-	STY scrtext_row
+	LDA #0								; 2c
+
+	\\ Overhead per column = 54c
+	\\ Carry is clear here after 16-bit addition above
 
 	.col_loop
+	TAY									; 2c
 
 	\\ Get left column of sprite data
 	.read_sprite_ptr
-	LDA font0_data,X					; 4c
+	LDA font0_data, X					; 4c
 
 	\\ Next sprite data byte
 	INX									; 2c
@@ -1150,27 +1242,25 @@ ENDIF
 	\\ Turn this into MODE 7 gfx code for left column
 	.scrtext_y_offset
 	ORA #&00							; where left_header = yy0 00000 - ** SELF-MODIFIED CODE
-	TAY									; 2c + 2c
-	LDA half_column_lookup, Y			; 4c
+	STA lookup_addr + 1					; 2c + 4c - ** MODIFIES CODE
+	.lookup_addr
+	LDA half_column_lookup				; 4c - ** SELF-MODIFIED CODE
 
 	\\ Write 3 pixels to screen
-	LDY scrtext_row						; 3c
-	ORA (writeptr), Y					; 6c
+	ORA (writeptr), Y					; 5c
 	STA (writeptr), Y					; 6c
-
-	\\ Have we written 6 bytes?
-	CPY #(5 * MODE7_char_width)			; 2c
-	BCS done_col_loop					; 3c
 
 	\\ Next MODE 7 row
 	TYA									; 2c
-;	CLC									; we know carry is clear because of branch test above
+;	CLC									; we know carry is clear because carry is never touched
 	ADC #MODE7_char_width				; 2c
-	STA scrtext_row						; 3c
 
-	JMP col_loop						; 3c
+	\\ Have we written 6 bytes?
+	CMP #(6 * MODE7_char_width)			; 2c
+	BCC col_loop						; 3c
 
-	\\ 44c per sprite byte written = 44c * 6 = 264c per column
+	\\ Cycle count 41c per sprite byte written = 41c * 6 = 246c
+	\\ Count now 38c..
 
 	.done_col_loop
 	\\ Have we written entire char?
@@ -1209,22 +1299,18 @@ ENDIF
 	STA scrtext_x_offset				; 3c
 
 	AND #&20							; 2c
-	BNE right_side						; 3c
+	BNE char_x_loop						; 3c
 
 	\\ Left side means new char
 	INC plot_char_x						; 5c
 
 	LDA plot_char_x						; 3c
 	CMP #MODE7_char_width				; 2c
-	BCS done_screen						; 3c
+	BCC char_x_loop						; 3c
 
-	.right_side
-
-	\\ 26c overhead for a new column
-	\\ One glyph draw = 16 * (26c + 264c) = 4640c + 43c for new character
-	\\ 72 columns = 4.5 glyphs = 72 * (26c + 264c) + 4 * 43c = 20880c + 172c = 21052c ~= 53% of frame
-
-	JMP char_x_loop						; 3c
+	\\ 26c overhead for a new column + 54c from before the loop...
+	\\ One glyph draw = 16 * (26c + 54c + 246c) = 16 * 326c = 5216c + 43c for new character
+	\\ 72 columns = 4.5 glyphs = 72 * (26c + 54c + 246c) + 4 * 43c = 23472c + 172c = 23644c ~= 59% of frame :(
 
 	.done_screen
 	\\ Increment column for next time
@@ -1274,7 +1360,7 @@ NEXT
 ALIGN &100
 .mod3_table					; wasteful to have all 256 entries but safer for now
 FOR n, 0, 255, 1
-	EQUB (n MOD 3)
+	EQUB (n MOD 3) * 64		; shift this up to top two bits to avoid shifting for use in lookup table
 NEXT
 
 ALIGN &100
@@ -1323,6 +1409,11 @@ FOR n, 0, 255, 1
 	EQUB RASTER_centre_row + RASTER_wave_rows * SIN(PI * n / 128)
 NEXT
 
+.scrtext_y_table			; don't need 256 entries but easier for now
+FOR n, 0, 255, 1
+	EQUB 40 + 10 * SIN(PI * n / 128)
+NEXT
+
 .scrtext_message
 
 	MAPCHAR '!', 1
@@ -1359,6 +1450,16 @@ IF ENABLE_ERASE_STARS
 .stars_table_byte
 SKIP STARS_num
 ENDIF
+
+\\ Teletext screen = bg col + black/new bg + fx + fg col
+.teletext_bg_col
+SKIP MODE7_char_height
+
+.teletext_fg_col
+SKIP MODE7_char_height
+
+.teletext_fx
+SKIP MODE7_char_height
 
 ALIGN &100
 
