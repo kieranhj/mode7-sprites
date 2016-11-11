@@ -34,7 +34,7 @@ BNE_OP = &D0
 
 ENABLE_ERASE_STARS = TRUE
 ENABLE_DOUBLE_BUFFER = FALSE
-ENABLE_CLEAR_SCREEN = FALSE
+ENABLE_CLEAR_SCREEN = TRUE
 
 \ ******************************************************************
 \ *	Define macros (prefer MACRO_* naming?)
@@ -106,6 +106,15 @@ GUARD &A0
 
 .raster_idx				SKIP 1
 
+.scrtext_col			SKIP 1
+.scrtext_idx			SKIP 1
+.scrtext_x_offset		SKIP 1
+.scrtext_y_offset		SKIP 1
+.scrtext_row			SKIP 1
+
+.srctext_tmp_col		SKIP 1
+.scrtext_tmp_idx		SKIP 1
+
 .old_irqv				SKIP 2
 .double_buffer			SKIP 1
 
@@ -160,6 +169,7 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	IF ENABLE_ERASE_STARS	
 	JSR mode7_starfield_init
 	ENDIF
+	JSR scrtext_init
 
 	\\ Initialise vars
 
@@ -234,7 +244,8 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	LDA #6
 	STA plot_data_rows
 
-	JSR mode7_plot_half
+;	JSR mode7_plot_half
+	JSR scrtext_poll
 
 ;	JSR mode7_raster_fx
 	JSR mode7_starfield_fx
@@ -669,7 +680,7 @@ IF ENABLE_CLEAR_SCREEN
 .mode7_erase_screen
 {
 	LDA #32
-	FOR y,0,21,1
+	FOR y,12,17,1			; 0,22
 	FOR x,PLOT_origin_col,MODE7_char_width-1,1
 	STA MODE7_base_addr + (y * MODE7_char_width) + x
 	NEXT
@@ -1042,6 +1053,208 @@ ENDIF
 
 
 \ ******************************************************************
+\ * Scrolltext
+\ ******************************************************************
+
+.scrtext_init
+{
+	LDA #0
+	STA scrtext_col
+	STA scrtext_idx
+
+	.return
+	RTS
+}
+
+.scrtext_poll
+{
+	\\ For current message get sprite data
+	\\ For current column get sprite data column
+
+	\\ For x=0 to 71 (column in texels) step 2
+	\\ Get y for column
+	\\ Calculate writeptr
+
+	\\ Copy column of sprite data to screen
+
+	\\ Increment sprite data column
+	\\ If end of sprite data next char
+	\\ Get new sprite data
+
+	\\ First character column
+	LDA #PLOT_origin_col
+	STA plot_char_x
+
+	\\ Get message character index
+	LDY scrtext_idx
+	.try_again
+	STY scrtext_tmp_idx
+	LDX scrtext_message, Y
+	BNE not_eom
+
+	LDY #0
+	STY scrtext_idx
+	BEQ try_again
+	.not_eom
+
+	\\ Look up our font data
+	LDA font_table_LO,X
+	STA readptr
+	LDA font_table_HI,X
+	STA readptr+1
+
+	\\ Get index into our sprite data for column
+	LDA #0
+	STA scrtext_x_offset
+
+	LDY scrtext_col
+	BEQ done_start_loop
+	CLC
+	.start_loop
+	ADC #6
+	DEY
+	BNE start_loop
+	.done_start_loop
+	\\ Index into our sprite table
+	TAX
+
+	LDA readptr
+	STA read_sprite_ptr+1
+	LDA readptr+1
+	STA read_sprite_ptr+2
+
+	.char_x_loop
+
+	\\ Get texel y for this column
+	LDY #36								; plot_y
+
+	\\ Get y offset
+	LDA mod3_table, Y
+
+	ASL A: ASL A: ASL A: ASL A: ASL A: ASL A
+	ORA scrtext_x_offset
+	STA scrtext_y_offset		
+
+	\\ Get char y
+	LDA div3_table, Y
+	TAY
+
+	\\ Write address to screen
+	CLC
+	LDA mode7_row_addr_LO,Y
+	ADC plot_char_x
+	STA writeptr
+	LDA mode7_row_addr_HI,Y
+	ADC #0
+	STA writeptr+1
+
+	\\ Copy a column of sprite data
+	LDY #0
+	STY scrtext_row
+
+	.col_loop
+
+	\\ Get left column of sprite data
+	.read_sprite_ptr
+	LDA font0_data,X
+
+	\\ Next sprite data byte
+	INX
+
+	\\ Turn this into MODE 7 gfx code for left column
+	ORA scrtext_y_offset				; where left_header = yy0 00000 - ** SELF-MODIFIED CODE
+	TAY									; 2c + 2c
+	LDA half_column_lookup, Y			; 4c
+
+	\\ Write 3 pixels to screen
+	LDY scrtext_row
+	ORA (writeptr), Y
+	STA (writeptr), Y
+
+	\\ Have we written 6 bytes?
+	CPY #200
+	BCS done_col_loop
+
+	\\ Next MODE 7 row
+	TYA
+	CLC
+	ADC #MODE7_char_width
+	STA scrtext_row
+
+	JMP col_loop
+
+	.done_col_loop
+	\\ Have we written entire char?
+	CPX #96
+	BCC cont_same_char
+
+	\\ Next char
+	\\ Get message character index
+	INC scrtext_tmp_idx
+	LDY scrtext_tmp_idx
+	.next_char
+	LDX scrtext_message, Y
+	CPX #0
+	BNE not_zero
+
+	LDY #0
+	STY scrtext_tmp_idx
+	JMP next_char
+
+	.not_zero
+	\\ Look up our font data
+	LDA font_table_LO,X
+	STA readptr
+	LDA font_table_HI,X
+	STA readptr+1
+
+	\\ Get index into our sprite data for column
+	LDX #0
+
+	LDA readptr
+	STA read_sprite_ptr+1
+	LDA readptr+1
+	STA read_sprite_ptr+2
+
+	.cont_same_char
+	\\ Next column
+	LDA scrtext_x_offset
+	EOR #&20
+	STA scrtext_x_offset
+
+	AND #&20
+	BNE right_side
+
+	\\ Left side means new char
+	INC plot_char_x
+
+	LDA plot_char_x
+	CMP #MODE7_char_width
+	BCS done_screen
+
+	.right_side
+
+	JMP char_x_loop
+
+	.done_screen
+	\\ Increment column for next time
+	INC scrtext_col
+
+	\\ Have we reached end of glyph?
+	LDA scrtext_col
+	CMP #16
+	BCC return
+
+	\\ Next char in message start of column
+	LDA #0
+	STA scrtext_col
+	INC scrtext_idx
+
+	.return
+	RTS
+}
+
+\ ******************************************************************
 \ *	Look up tables
 \ ******************************************************************
 
@@ -1117,12 +1330,26 @@ FOR n, 0, 255, 1
 	EQUB RASTER_centre_row + RASTER_wave_rows * SIN(PI * n / 128)
 NEXT
 
+.scrtext_message
+
+	MAPCHAR '!', 1
+	MAPCHAR ',', 12
+	MAPCHAR '-', 13
+	MAPCHAR '.', 14
+	MAPCHAR '0','9',16
+	MAPCHAR '?', 31
+	MAPCHAR ' ', 32
+	MAPCHAR 'A','Z',33
+	MAPCHAR 'a','z',33
+
+EQUS "HELLO WORLD! THIS IS A MESSAGE... 0123456789?-,.   "
+EQUB 0
 
 \ ******************************************************************
 \ *	Included data
 \ ******************************************************************
 
-INCLUDE "font.6502"
+INCLUDE "font2.6502"
 
 \ ******************************************************************
 \ *	End address to be saved
