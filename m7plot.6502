@@ -35,7 +35,7 @@ BNE_OP = &D0
 ENABLE_ERASE_STARS = TRUE
 ENABLE_DOUBLE_BUFFER = FALSE
 ENABLE_CLEAR_SCREEN = TRUE
-ENABLE_KEY_SPRITE = FALSE
+ENABLE_KEY_SPRITE = TRUE
 
 \ ******************************************************************
 \ *	Define macros (prefer MACRO_* naming?)
@@ -176,10 +176,11 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 
 	\\ Initialise vars
 
-	LDA #128
+	LDA #8
 	STA test_x
-	LDA #129
+	LDA #8
 	STA test_y
+
 	LDA #0
 	STA raster_idx
 
@@ -225,6 +226,9 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	JSR mode7_erase_screen
 	ENDIF
 
+;	JSR scrtext_poll
+	JSR scrtext_poll_whole
+
 	IF ENABLE_KEY_SPRITE
 	\\ Check for keys
 	{
@@ -256,22 +260,21 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	STA plot_x
 	LDA test_y
 	STA plot_y
-	LDA #LO(font33_data)
-	STA plot_data_ptr
-	LDA #HI(font33_data)
-	STA plot_data_ptr+1
-	LDA #16
-	STA plot_data_pitch
-	LDA #6
-	STA plot_data_rows
+	JSR plot_fast_mask
 
-	JSR mode7_plot_half
+;	LDA #LO(font33_data)
+;	STA plot_data_ptr
+;	LDA #HI(font33_data)
+;	STA plot_data_ptr+1
+;	LDA #16
+;	STA plot_data_pitch
+;	LDA #6
+;	STA plot_data_rows
+;	JSR mode7_plot_half
 	ENDIF
 
-;	JSR scrtext_poll
-	JSR scrtext_poll_whole
-	JSR mode7_raster_fx
 	JSR mode7_starfield_fx
+	JSR mode7_raster_fx
 	JSR teletext_poll
 	JSR mode7_mirror_fx
 
@@ -1562,6 +1565,284 @@ ENDIF
 
 
 \ ******************************************************************
+\ *	Fast small sprite plot - fixed 4x3 chars
+\ * Coordinates plot_x, plot_y assume 4 char boundary
+\ * No clipping but safe to call outside of visible area
+\ ******************************************************************
+
+.plot_fast
+{
+	\\ X coordinate to char
+	LDA plot_x
+	LSR A
+
+	CMP #PLOT_origin_col
+	BCS visible_left
+
+	.not_visible
+	RTS
+
+	.visible_left
+	\\ If X char outside edge of screen then return
+	CMP #MODE7_char_width - 4
+	BCS not_visible
+
+	STA plot_char_x
+
+	\\ Y coordinate to char
+	LDY plot_y
+	LDA div3_table, Y
+
+	\\ If Y char outside edge of screen then return	
+	CMP #MODE7_char_height - 3
+	BCS not_visible
+
+	STA plot_char_y
+
+	\\ Where are we reading data from?
+
+	LDA plot_x
+	AND #&1									; x_offset
+	ORA mod3_table, Y						; y_offset
+	LSR A									; shift down
+	BCC no_x_offset							; if x_offset falls into carry
+	ORA #&10								; add it back (shifted down)
+	.no_x_offset
+	TAX										; put this in X
+
+	\\ Where are we writing to?
+
+	LDY plot_char_y
+
+	CLC									; 2c
+	LDA mode7_row_addr_LO, Y			; 4c
+	ADC plot_char_x						; 3c
+	STA writeptr						; 3c
+	LDA mode7_row_addr_HI, Y			; 4c
+	ADC #0								; 2c
+	STA writeptr+1						; 3c
+	
+	CLC
+	LDY #0
+
+	\\ Write 12 bytes...
+
+	\\ How to do this as a loop with arbitrary sprite data
+	\\ Or is this even necessary?  Just have setup code in subroutine
+	\\ And unroll custom code for each sprite - how big is it?
+
+	\\ 4 bytes per row x 3 rows
+	LDA ball_data, X
+	STA (writeptr), Y
+
+	INX:INY
+	LDA ball_data, X
+	STA (writeptr), Y
+
+	INX:INY
+	LDA ball_data, X
+	STA (writeptr), Y
+
+	INX:INY
+	LDA ball_data, X
+	STA (writeptr), Y
+	
+	INX
+	\\ Next row
+	TYA
+	ADC #MODE7_char_width - 3			; already written 3 bytes
+	TAY
+
+	LDA ball_data, X
+	STA (writeptr), Y
+
+	INX:INY
+	LDA ball_data, X
+	STA (writeptr), Y
+
+	INX:INY
+	LDA ball_data, X
+	STA (writeptr), Y
+
+	INX:INY
+	LDA ball_data, X
+	STA (writeptr), Y
+	
+	INX
+	\\ Next row
+	TYA
+	ADC #MODE7_char_width - 3			; already written 3 bytes
+	TAY
+
+	LDA ball_data, X
+	STA (writeptr), Y
+
+	INX:INY
+	LDA ball_data, X
+	STA (writeptr), Y
+
+	INX:INY
+	LDA ball_data, X
+	STA (writeptr), Y
+
+	INX:INY
+	LDA ball_data, X
+	STA (writeptr), Y
+	
+	.return
+	RTS
+}
+
+
+.plot_fast_mask
+{
+	\\ X coordinate to char
+	LDA plot_x
+	LSR A
+
+	CMP #PLOT_origin_col
+	BCS visible_left
+
+	.not_visible
+	RTS
+
+	.visible_left
+	\\ If X char outside edge of screen then return
+	CMP #MODE7_char_width - 4
+	BCS not_visible
+
+	STA plot_char_x
+
+	\\ Y coordinate to char
+	LDY plot_y
+	LDA div3_table, Y
+
+	\\ If Y char outside edge of screen then return	
+	CMP #MODE7_char_height - 3
+	BCS not_visible
+
+	STA plot_char_y
+
+	\\ Where are we reading data from?
+
+	LDA plot_x
+	AND #&1									; x_offset
+	ORA mod3_table, Y						; y_offset
+	LSR A									; shift down
+	BCC no_x_offset							; if x_offset falls into carry
+	ORA #&10								; add it back (shifted down)
+	.no_x_offset
+	TAX										; put this in X
+
+	\\ Where are we writing to?
+
+	LDY plot_char_y
+
+	CLC									; 2c
+	LDA mode7_row_addr_LO, Y			; 4c
+	ADC plot_char_x						; 3c
+	STA writeptr						; 3c
+	LDA mode7_row_addr_HI, Y			; 4c
+	ADC #0								; 2c
+	STA writeptr+1						; 3c
+	
+	CLC
+	LDY #0
+
+	\\ Write 12 bytes...
+
+	\\ How to do this as a loop with arbitrary sprite data
+	\\ Or is this even necessary?  Just have setup code in subroutine
+	\\ And unroll custom code for each sprite - how big is it?
+
+	\\ 4 bytes per row x 3 rows
+	LDA (writeptr), Y
+	AND ball_mask, X
+	ORA ball_data, X
+	STA (writeptr), Y
+
+	INX:INY
+	LDA (writeptr), Y
+	AND ball_mask, X
+	ORA ball_data, X
+	STA (writeptr), Y
+
+	INX:INY
+	LDA (writeptr), Y
+	AND ball_mask, X
+	ORA ball_data, X
+	STA (writeptr), Y
+
+	INX:INY
+	LDA (writeptr), Y
+	AND ball_mask, X
+	ORA ball_data, X
+	STA (writeptr), Y
+	
+	INX
+	\\ Next row
+	TYA
+	ADC #MODE7_char_width - 3			; already written 3 bytes
+	TAY
+
+	LDA (writeptr), Y
+	AND ball_mask, X
+	ORA ball_data, X
+	STA (writeptr), Y
+
+	INX:INY
+	LDA (writeptr), Y
+	AND ball_mask, X
+	ORA ball_data, X
+	STA (writeptr), Y
+
+	INX:INY
+	LDA (writeptr), Y
+	AND ball_mask, X
+	ORA ball_data, X
+	STA (writeptr), Y
+
+	INX:INY
+	LDA (writeptr), Y
+	AND ball_mask, X
+	ORA ball_data, X
+	STA (writeptr), Y
+	
+	INX
+	\\ Next row
+	TYA
+	ADC #MODE7_char_width - 3			; already written 3 bytes
+	TAY
+
+	LDA (writeptr), Y
+	AND ball_mask, X
+	ORA ball_data, X
+	STA (writeptr), Y
+
+	INX:INY
+	LDA (writeptr), Y
+	AND ball_mask, X
+	ORA ball_data, X
+	STA (writeptr), Y
+
+	INX:INY
+	LDA (writeptr), Y
+	AND ball_mask, X
+	ORA ball_data, X
+	STA (writeptr), Y
+
+	INX:INY
+	LDA (writeptr), Y
+	AND ball_mask, X
+	ORA ball_data, X
+	STA (writeptr), Y
+	
+	.return
+	RTS
+}
+
+
+\ ******************************************************************
 \ *	Look up tables
 \ ******************************************************************
 
@@ -1673,6 +1954,8 @@ EQUB 224
 \ ******************************************************************
 
 INCLUDE "font2.6502"
+
+INCLUDE "ball.6502"
 
 \ ******************************************************************
 \ *	End address to be saved

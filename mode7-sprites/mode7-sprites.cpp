@@ -15,8 +15,10 @@ static int global_h = 0;
 
 int get_colour_from_rgb(unsigned char r, unsigned char g, unsigned char b)
 {
-//	return (r ? 1 : 0) + (g ? 2 : 0) + (b ? 4 : 0);
-	return r ? 7 : (g ? 7 : (b ? 7 : 0));
+	int col = (r ? 1 : 0) + (g ? 2 : 0) + (b ? 4 : 0);
+//	int col = r ? 7 : (g ? 7 : (b ? 7 : 0));
+
+	return col;
 }
 
 int get_pixel_from_image(int x, int y, int x_offset, int y_offset)
@@ -30,9 +32,9 @@ int get_pixel_from_image(int x, int y, int x_offset, int y_offset)
 	x += global_x;
 	y += global_y;
 
-//	printf("(%d, %d) = [%d %d %d]\n", x, y, src(x, y, 0), src(x, y, 1), src(x, y, 2));
+	// printf("(%d, %d) = [%d %d %d] depth=%d\n", x, y, src(x, y, 0), src(x, y, 1), src(x, y, 2), src._depth);
 
-	return get_colour_from_rgb(src(x, y, 0), src._depth>1?src(x, y, 1):src(x,y,0), src._depth>2?src(x, y, 2):src(x,y,0));
+	return get_colour_from_rgb(src(x, y, 0), src(x, y, 1), src(x, y, 2));
 }
 
 unsigned char get_graphic_char_from_image(int x7, int y7, int x_offset, int y_offset)
@@ -61,12 +63,14 @@ unsigned char get_mask_char_from_image(int x7, int y7, int x_offset, int y_offse
 
 	// Anything that is not black is considered mask
 
-	return (get_pixel_from_image(x, y, x_offset, y_offset) ? 1 : 0)
+	unsigned char mask = (get_pixel_from_image(x, y, x_offset, y_offset) ? 1 : 0)
 		+ (get_pixel_from_image(x + 1, y, x_offset, y_offset) ? 2 : 0)
 		+ (get_pixel_from_image(x, y + 1, x_offset, y_offset) ? 4 : 0)
 		+ (get_pixel_from_image(x + 1, y + 1, x_offset, y_offset) ? 8 : 0)
 		+ (get_pixel_from_image(x, y + 2, x_offset, y_offset) ? 16 : 0)
 		+ (get_pixel_from_image(x + 1, y + 2, x_offset, y_offset) ? 64 : 0);
+
+	return mask ^ 0xff;
 }
 
 void make_sprite_data(FILE *outfile, const char *label, int pixel_width, int pixel_height, bool swizzle)
@@ -125,6 +129,71 @@ void make_sprite_data(FILE *outfile, const char *label, int pixel_width, int pix
 	}
 }
 
+void make_six_data(FILE *outfile, const char *label, int char_width, int char_height, int align, bool mask)
+{
+	fprintf(outfile, ".%s_data\n", label);
+
+	for (int y_offset = 0; y_offset < 3; y_offset++)
+	{
+		for (int x_offset = 0; x_offset < 2; x_offset++)
+		{
+			fprintf(outfile, "; x_offset=%d, y_offset=%d\n", x_offset, y_offset);
+
+			for (int y7 = 0; y7 < char_height; y7++)
+			{
+				fprintf(outfile, "EQUB ");
+				for (int x7 = 0; x7 < char_width; x7++)
+				{
+					if (x7 != 0)
+					{
+						fprintf(outfile, ",");
+					}
+					fprintf(outfile, "%d", get_graphic_char_from_image(x7, y7, x_offset, y_offset));
+				}
+				fprintf(outfile, "\n");
+			}
+
+			if (align)
+			{
+				fprintf(outfile, "ALIGN %d\n", align);
+			}
+		}
+	}
+
+	if (mask)
+	{
+		fprintf(outfile, ".%s_mask\n", label);
+
+		for (int y_offset = 0; y_offset < 3; y_offset++)
+		{
+			for (int x_offset = 0; x_offset < 2; x_offset++)
+			{
+				fprintf(outfile, "; x_offset=%d, y_offset=%d\n", x_offset, y_offset);
+
+				for (int y7 = 0; y7 < char_height; y7++)
+				{
+					fprintf(outfile, "EQUB ");
+					for (int x7 = 0; x7 < char_width; x7++)
+					{
+						if (x7 != 0)
+						{
+							fprintf(outfile, ",");
+						}
+						fprintf(outfile, "%d", get_mask_char_from_image(x7, y7, x_offset, y_offset));
+					}
+					fprintf(outfile, "\n");
+				}
+
+				if (align)
+				{
+					fprintf(outfile, "ALIGN %d\n", align);
+				}
+			}
+		}
+	}
+}
+
+
 int main(int argc, char **argv)
 {
 	cimg_usage("MODE 7 sprite convertor.\n\nUsage : mode7-sprites [options]");
@@ -137,6 +206,8 @@ int main(int argc, char **argv)
 	const char *const geom = cimg_option("-g", "16x16", "Sprite input size (when extracting from font/sprite sheet)");
 	const int num_glyphs = cimg_option("-n", 0, "Num glyphs / sprites to extract (0=all)");
 	const bool swizzle = cimg_option("-swizzle", false, "Output data in column order (default=row order)");
+	const bool six = cimg_option("-six", false, "Generate six pre-shifted offsets as sprite data");
+	const int align = cimg_option("-align", 0, "Align sprite data blocks");
 
 	if (cimg_option("-h", false, 0)) std::exit(0);
 	if (input_name == NULL)  std::exit(0);
@@ -181,16 +252,29 @@ int main(int argc, char **argv)
 
 	fprintf(outfile, "\\\\ Input file '%s'\n", input_name);
 	fprintf(outfile, "\\\\ Image size=%dx%d pixels=%dx%d\n", src._width, src._height, pixel_width, pixel_height);
-	fprintf(outfile, "\\\\ Data in %s order\n", swizzle ? "COLUMN" : "ROW");
 	fprintf(outfile, ".%s\n", label);
 
-	if (swizzle)
+	if (six)
 	{
-		fprintf(outfile, "EQUB %d, %d\t;char height, pixel width\n", char_height, pixel_width);
+		fprintf(outfile, "EQUB %d, %d\t;char width, char height\n", char_width, char_height);
+
+		if (align)
+		{
+			fprintf(outfile, "ALIGN %d\n", align);
+		}
 	}
 	else
 	{
-		fprintf(outfile, "EQUB %d, %d\t;pixel width, char height\n", pixel_width, char_height);
+		fprintf(outfile, "\\\\ Data in %s order\n", swizzle ? "COLUMN" : "ROW");
+
+		if (swizzle)
+		{
+			fprintf(outfile, "EQUB %d, %d\t;char height, pixel width\n", char_height, pixel_width);
+		}
+		else
+		{
+			fprintf(outfile, "EQUB %d, %d\t;pixel width, char height\n", pixel_width, char_height);
+		}
 	}
 
 	if (font)
@@ -231,8 +315,15 @@ int main(int argc, char **argv)
 		}
 	}
 	else
-	{													
-		make_sprite_data(outfile, label, pixel_width, pixel_height, swizzle);
+	{
+		if (six)
+		{
+			make_six_data(outfile, label, char_width, char_height, align, mask);
+		}
+		else
+		{
+			make_sprite_data(outfile, label, pixel_width, pixel_height, swizzle);
+		}
 	}
 
 	fclose(outfile);
