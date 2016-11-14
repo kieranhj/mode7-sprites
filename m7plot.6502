@@ -260,7 +260,11 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	STA plot_x
 	LDA test_y
 	STA plot_y
-	JSR plot_fast_mask
+	LDA #LO(ball_data)
+	STA plot_data_ptr
+	LDA #HI(ball_data)
+	STA plot_data_ptr+1
+	JSR plot_fast_mask_loop
 
 ;	LDA #LO(font33_data)
 ;	STA plot_data_ptr
@@ -1697,46 +1701,46 @@ ENDIF
 .plot_fast_mask
 {
 	\\ X coordinate to char
-	LDA plot_x
-	LSR A
+	LDA plot_x							; 3c
+	LSR A								; 2c
 
-	CMP #PLOT_origin_col
-	BCS visible_left
+	CMP #PLOT_origin_col				; 2c
+	BCS visible_left					; 3c
 
 	.not_visible
 	RTS
 
 	.visible_left
 	\\ If X char outside edge of screen then return
-	CMP #MODE7_char_width - 4
-	BCS not_visible
+	CMP #MODE7_char_width - 4			; 2c
+	BCS not_visible						; 3c
 
-	STA plot_char_x
+	STA plot_char_x						; 3c
 
 	\\ Y coordinate to char
-	LDY plot_y
-	LDA div3_table, Y
+	LDY plot_y							; 3c
+	LDA div3_table, Y					; 4c
 
 	\\ If Y char outside edge of screen then return	
-	CMP #MODE7_char_height - 3
-	BCS not_visible
+	CMP #MODE7_char_height - 3			; 2c
+	BCS not_visible						; 3c
 
-	STA plot_char_y
+	STA plot_char_y						; 3c
 
 	\\ Where are we reading data from?
 
-	LDA plot_x
-	AND #&1									; x_offset
-	ORA mod3_table, Y						; y_offset
-	LSR A									; shift down
-	BCC no_x_offset							; if x_offset falls into carry
-	ORA #&10								; add it back (shifted down)
+	LDA plot_x							; 3c
+	AND #&1								; 2c x_offset
+	ORA mod3_table, Y					; 4c y_offset
+	LSR A								; 2c shift down
+	BCC no_x_offset						; 3c if x_offset falls into carry
+	ORA #&10							; 2c add it back (shifted down)
 	.no_x_offset
-	TAX										; put this in X
+	TAX									; 2c put this in X
 
 	\\ Where are we writing to?
 
-	LDY plot_char_y
+	LDY plot_char_y						; 3c
 
 	CLC									; 2c
 	LDA mode7_row_addr_LO, Y			; 4c
@@ -1746,8 +1750,9 @@ ENDIF
 	ADC #0								; 2c
 	STA writeptr+1						; 3c
 	
-	CLC
-	LDY #0
+	LDY #0								; 3c
+
+	\\ Setup overhead = 76c
 
 	\\ Write 12 bytes...
 
@@ -1756,6 +1761,35 @@ ENDIF
 	\\ And unroll custom code for each sprite - how big is it?
 
 	\\ 4 bytes per row x 3 rows
+	LDA (writeptr), Y					; 5c
+	AND ball_mask, X					; 4c
+	ORA ball_data, X					; 4c
+	STA (writeptr), Y					; 6c
+
+	INX:INY								; 4c
+	LDA (writeptr), Y
+	AND ball_mask, X
+	ORA ball_data, X
+	STA (writeptr), Y
+
+	INX:INY
+	LDA (writeptr), Y
+	AND ball_mask, X
+	ORA ball_data, X
+	STA (writeptr), Y
+
+	INX:INY
+	LDA (writeptr), Y
+	AND ball_mask, X
+	ORA ball_data, X
+	STA (writeptr), Y
+	
+	INX									; 2c
+	\\ Next row
+	TYA									; 2c
+	ADC #MODE7_char_width - 3			; 2c already written 3 bytes
+	TAY									; 2c
+
 	LDA (writeptr), Y
 	AND ball_mask, X
 	ORA ball_data, X
@@ -1808,35 +1842,118 @@ ENDIF
 	ORA ball_data, X
 	STA (writeptr), Y
 	
-	INX
-	\\ Next row
-	TYA
-	ADC #MODE7_char_width - 3			; already written 3 bytes
-	TAY
+	\\ Writing masked sprite data = 12 x 19c + 9 x 4c + 3 x 8c = 288c
+	\\ Total = 76c + 288c = 364c
 
-	LDA (writeptr), Y
-	AND ball_mask, X
-	ORA ball_data, X
-	STA (writeptr), Y
+	.return
+	RTS
+}
 
-	INX:INY
-	LDA (writeptr), Y
-	AND ball_mask, X
-	ORA ball_data, X
-	STA (writeptr), Y
 
-	INX:INY
-	LDA (writeptr), Y
-	AND ball_mask, X
-	ORA ball_data, X
-	STA (writeptr), Y
+.plot_fast_mask_loop
+{
+	\\ X coordinate to char
+	LDA plot_x							; 3c
+	LSR A								; 2c
 
-	INX:INY
-	LDA (writeptr), Y
-	AND ball_mask, X
-	ORA ball_data, X
-	STA (writeptr), Y
+	CMP #PLOT_origin_col				; 2c
+	BCS visible_left					; 2c
+
+	.not_visible
+	RTS
+
+	.visible_left
+	\\ If X char outside edge of screen then return
+	CMP #MODE7_char_width - 4			; 2c
+	BCS not_visible						; 2c
+
+	TAX
+
+	\\ Y coordinate to char
+	LDY plot_y							; 3c
+	LDA div3_table, Y					; 4c
+
+	\\ If Y char outside edge of screen then return	
+	CMP #MODE7_char_height - 3			; 2c
+	BCS not_visible						; 2c
+
+	STA plot_char_y						; 3c
+
+	\\ Where are we reading data from?
+
+	LDA plot_x							; 3c
+	AND #&1								; 2c x_offset
+	ORA mod3_table, Y					; 4c y_offset
+	LSR A								; 2c shift down
+	BCC no_x_offset						; 3c if x_offset falls into carry
+	ORA #&10							; 2c add it back (shifted down)
+	CLC									; 2c
+	.no_x_offset
+	ADC plot_data_ptr					; 3c
+	STA sprite_data_addr + 1			; 4c
+	LDA plot_data_ptr+1					; 3c
+	ADC #0								; 2c
+	STA sprite_data_addr + 2			; 4c
+
+	\\ Mask data lies after sprite data
+	\\ Carry clear after addition above
+	LDA sprite_data_addr + 1			; 4c
+	ADC #96								; 2c
+	STA sprite_mask_addr + 1			; 4c
+	LDA sprite_data_addr + 2			; 4c
+	ADC #0								; 2c
+	STA sprite_mask_addr + 2			; 4c
+
+	\\ Where are we writing to?
+
+	LDY plot_char_y						; 3c
+
+	LDA mode7_row_addr_LO, Y			; 4c
+	STA screen_load_addr + 1			; 4c
+	STA screen_write_addr + 1			; 4c
+	LDA mode7_row_addr_HI, Y			; 4c
+	STA screen_load_addr + 2			; 4c
+	STA screen_write_addr + 2			; 4c
 	
+	LDY #0								; 2c
+
+	\\ Setup overhead = 110c
+
+	\\ Write 12 bytes...
+	\\ 4 bytes per row x 3 rows
+
+	.loop
+	.screen_load_addr
+	LDA &7C00, X						; 4c
+	.sprite_mask_addr
+	AND ball_mask, Y					; 4c
+	.sprite_data_addr
+	ORA ball_data, Y					; 4c
+	.screen_write_addr
+	STA &7C00, X						; 5c
+
+	INY									; 2c
+	CPY #12								; 2c
+	BCS return							; 2c
+
+	INX									; 2c
+
+	TYA									; 2c
+	AND #&3								; 2c
+	BNE loop							; 3c
+
+	\\ Every byte = 32c
+
+	TXA									; 2c
+	ADC #MODE7_char_width - 4			; 2c already written 4 bytes
+	TAX									; 2c
+	BNE loop							; 3c
+
+	\\ Every row = 9c
+
+	\\ Total for write = 12 x 32c + 3 x 9c = 411c
+	\\ Overall = 110c + 411c = 521c
+
 	.return
 	RTS
 }
