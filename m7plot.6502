@@ -1867,7 +1867,7 @@ ENDIF
 	CMP #MODE7_char_width - 4			; 2c
 	BCS not_visible						; 2c
 
-	TAX
+	STA plot_char_x						; 3c
 
 	\\ Y coordinate to char
 	LDY plot_y							; 3c
@@ -1877,7 +1877,7 @@ ENDIF
 	CMP #MODE7_char_height - 3			; 2c
 	BCS not_visible						; 2c
 
-	STA plot_char_y						; 3c
+	TAX									; 2c - plot_char_y
 
 	\\ Where are we reading data from?
 
@@ -1906,18 +1906,19 @@ ENDIF
 
 	\\ Where are we writing to?
 
-	LDY plot_char_y						; 3c
-
-	LDA mode7_row_addr_LO, Y			; 4c
+	LDA mode7_row_addr_LO, X			; 4c
+	ADC plot_char_x						; 3c
 	STA screen_load_addr + 1			; 4c
 	STA screen_write_addr + 1			; 4c
-	LDA mode7_row_addr_HI, Y			; 4c
+	LDA mode7_row_addr_HI, X			; 4c
+	ADC #0								; 2c
 	STA screen_load_addr + 2			; 4c
 	STA screen_write_addr + 2			; 4c
 	
 	LDY #0								; 2c
+	LDX #0								; 2c
 
-	\\ Setup overhead = 110c
+	\\ Setup overhead = 116c
 
 	\\ Write 12 bytes...
 	\\ 4 bytes per row x 3 rows
@@ -1933,31 +1934,18 @@ ENDIF
 	STA &7C00, X						; 5c
 
 	INY									; 2c
-	CPY #12								; 2c
-	BCS return							; 2c
+	LDX fast_plot_index, Y				; 4c
+	BPL loop							; 3c
 
-	INX									; 2c
-
-	TYA									; 2c
-	AND #&3								; 2c
-	BNE loop							; 3c
-
-	\\ Every byte = 32c
-
-	TXA									; 2c
-	ADC #MODE7_char_width - 4			; 2c already written 4 bytes
-	TAX									; 2c
-	BNE loop							; 3c
-
-	\\ Every row = 9c
-
-	\\ Total for write = 12 x 32c + 3 x 9c = 411c
-	\\ Overall = 110c + 411c = 521c
+	\\ Total for write = 12 x 26c = 312c
+	\\ Overall = 116c + 312c = 428c
 
 	.return
 	RTS
 }
 
+.fast_plot_index
+EQUB 0, 1, 2, 3, 40, 41, 42, 43, 80, 81, 82, 83, 255 
 
 \ ******************************************************************
 \ *	Look up tables
