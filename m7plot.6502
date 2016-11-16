@@ -36,6 +36,7 @@ ENABLE_ERASE_STARS = TRUE
 ENABLE_DOUBLE_BUFFER = FALSE
 ENABLE_CLEAR_SCREEN = TRUE
 ENABLE_KEY_SPRITE = TRUE
+ENABLE_TIMED_DRAW = TRUE
 
 \ ******************************************************************
 \ *	Define macros (prefer MACRO_* naming?)
@@ -70,7 +71,7 @@ MIRROR_top_row = 22
 MIRROR_read_row = MIRROR_top_row - 1
 
 STARS_num = 22
-DRAW_timer_ms = 28 * 8 * 64				; not sure exactly how MODE 7 is timed but we'll find out :)
+DRAW_timer_ms = 235 * 64				; not sure exactly how MODE 7 is timed but we'll find out :)
 
 \ ******************************************************************
 \ *	Define fast (zero page) runtime variables
@@ -214,14 +215,17 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 
 	.loop
 
+	\\ Wait for vsync - in whichever form we choose
+
+	IF ENABLE_TIMED_DRAW
 	LDA draw_signal
 	.wait_for_signal
 	CMP draw_signal
 	BEQ wait_for_signal
-
-	\\ Wait for vsync - actually waiting for draw signal from Timer 1
-;	LDA #19
-;	JSR osbyte
+	ELSE
+	LDA #19
+	JSR osbyte
+	ENDIF
 
 	IF ENABLE_CLEAR_SCREEN
 	JSR mode7_erase_screen
@@ -259,12 +263,14 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	}
 
 	LDX test_x
+	STX plot_x
 	LDY test_y
-	LDA #LO(ball_data)
+	STY plot_y
+	LDA #LO(ball15e_data)
 	STA plot_data_ptr
-	LDA #HI(ball_data)
+	LDA #HI(ball15e_data)
 	STA plot_data_ptr+1
-	JSR plot_fast_mask_loop
+	JSR plot_fast_masked_16e
 
 ;	LDA #LO(font33_data)
 ;	STA plot_data_ptr
@@ -414,6 +420,15 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	RTS
 }
 
+.mode7_timer_bar
+{
+	lda #MODE7_new_bg
+FOR n, 0, MODE7_char_height - 1
+	sta MODE7_base_addr + n * MODE7_char_width + (MODE7_char_width - 1)
+NEXT
+	rts
+}
+
 \ ******************************************************************
 \ *	MODE 7 sprite plot routine
 \ * Sprite data address = plot_data_ptr
@@ -424,7 +439,7 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 \ * NB. These are preserved between calls so can be reused
 \ ******************************************************************
 
-.mode7_plot_half
+.mode7_plot_full_clipped
 {
 	\\ Zero any temporary variables
 	LDY #0
@@ -701,11 +716,196 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	\\ Cycle count = 64 overhead per character row written to screen
 	\\ E.g. 32 pixel height = 11 character rows = 704 cycles
 
-	\\ So overall 32 x 32 full sprite plot = ((57 * 16) + 64) * 11 = 10,736 cycles :S
+	\\ So overall 32 x 32 full sprite plot (NO MASK!) = ((57 * 16) + 64) * 11 = 10,736 cycles :S
+	\\ So overall 16 x 16 full sprite plot (NO MASK!) = ((57 * 8) + 64) * 6 = 3,120 cycles :S
 
 	.return
 	RTS
 }
+
+\\ 16x16 sprite only but using column encoded data
+.mode7_plot_masked_16c
+{
+	\\ X coordinate to char
+	LDA plot_x							; 3c
+	LSR A								; 2c
+
+	CMP #PLOT_origin_col				; 2c
+	BCS visible_left					; 2c
+
+	.not_visible
+	RTS
+
+	.visible_left
+	\\ If X char outside edge of screen then return
+	CMP #MODE7_char_width - 8			; 2c
+	BCS not_visible						; 2c
+
+	STA plot_char_x						; 3c
+
+	\\ Y coordinate to char
+	LDY plot_y							; 3c
+	LDA div3_table, Y					; 4c
+
+	\\ If Y char outside edge of screen then return	
+	CMP #MODE7_char_height - 6			; 2c
+	BCS not_visible						; 2c
+
+	STA plot_char_y						; 3c
+
+	\\ Where are we reading data from?
+
+	LDA plot_data_ptr
+	STA read_sprite_ptr1 + 1
+	STA read_sprite_ptr2 + 1
+	CLC
+	ADC #(6 * 16)
+	STA read_mask_ptr1 + 1
+	STA read_mask_ptr2 + 1
+	\\ Carry maybe set
+	LDA plot_data_ptr+1
+	STA read_sprite_ptr1 + 2
+	STA read_sprite_ptr2 + 2
+	ADC #0
+	STA read_mask_ptr1 + 2
+	STA read_mask_ptr2 + 2
+
+	\\ Where are we writing to?
+	LDX plot_char_y
+
+	CLC
+	LDA mode7_row_addr_LO, X			; 4c
+	ADC plot_char_x						; 3c
+	STA writeptr						; 3c
+	LDA mode7_row_addr_HI, X			; 4c
+	ADC #0								; 2c
+	STA writeptr+1						; 3c
+
+	\\ Run time tweaks
+
+	LDA mod3_table, Y					; 4c y_offset
+	STA plot_half_left + 1				; ** MODIFIES CODE		
+	STA mask_half_left + 1				; ** MODIFIES CODE		
+	ORA #&20
+	STA plot_half_right + 1				; ** MODIFIES CODE
+	STA mask_half_right + 1				; ** MODIFIES CODE
+
+	.start_plot
+	\\ Plot all bytes
+	LDX #0
+	STX lookup_addr1 + 1				; 2c + 4c - ** MODIFIES CODE
+
+	LDY #0
+
+	\\ Start left or right column
+	LDA plot_x
+	AND #&1
+	BNE start_right_half
+
+	.loop
+
+	\\ Read mask data
+
+	.read_mask_ptr1
+	LDA &1000, X
+	\\ Turn this into MODE 7 gfx code for left column
+	.mask_half_left
+	ORA #&00         					; where left_header = yy0 00000 - ** SELF-MODIFIED CODE
+	STA lookup_mask1 + 1				; 2c + 4c - ** MODIFIES CODE
+
+	\\ Read sprite data
+
+	.read_sprite_ptr1
+	LDA &2000, X
+	\\ Turn this into MODE 7 gfx code for left column
+	.plot_half_left
+	ORA #&00         					; where left_header = yy0 00000 - ** SELF-MODIFIED CODE
+	STA lookup_addr1 + 1				; 2c + 4c - ** MODIFIES CODE
+
+	\\ Get right column of sprite data...
+	INX									; 2c
+
+
+	\\ Right column of byte
+
+	.start_right_half
+
+	.read_mask_ptr2
+	LDA &1000, X
+
+	\\ Turn this into MODE 7 gfx code for right column
+	.mask_half_right
+	ORA #&20			        		; where right_header = yy1 00000 - ** SELF-MODIFIED CODE
+	STA lookup_mask2 + 1				; 2c + 4c - ** MODIFIES CODE
+	.lookup_mask2
+	LDA half_column_lookup				; 4c - ** SELF-MODIFIED CODE
+
+	\\ Combine it with left column
+	.lookup_mask1
+	ORA half_column_lookup				; 4c - ** SELF-MODIFIED CODE
+
+	\\ Mask screen byte
+	AND (writeptr), Y
+	STA masked_byte + 1
+
+	.read_sprite_ptr2
+	LDA &2000, X
+
+	\\ Turn this into MODE 7 gfx code for right column
+	.plot_half_right
+	ORA #&20			        		; where right_header = yy1 00000 - ** SELF-MODIFIED CODE
+	STA lookup_addr2 + 1				; 2c + 4c - ** MODIFIES CODE
+	.lookup_addr2
+	LDA half_column_lookup				; 4c - ** SELF-MODIFIED CODE
+
+	\\ Combine it with left column
+	.lookup_addr1
+	ORA half_column_lookup				; 4c - ** SELF-MODIFIED CODE
+
+	\\ For mask...
+	.masked_byte
+	ORA #0			; masked_byte`
+
+	\\ Write combined columns to screen	
+	STA (writeptr), Y
+
+	\\ Next byte of data
+	INX
+	
+	\\ Look up where this should go (faster than calculating it)
+	LDY fixed_plot_index, X
+
+	\\ Awkward check for odd number of columns
+	BEQ skip_last_column 
+
+	\\ Loop until finished
+	CPY #&FF
+	BNE loop
+
+	.return
+	RTS
+
+	\\ Bit of a hack to just drop the last column of our sprite data when x_offset = 1
+	.skip_last_column
+	STY lookup_addr1 + 1				; 2c + 4c - ** MODIFIES CODE
+	LDA #31								; 31 is mask for everything
+	STA lookup_mask1 + 1
+	INX
+	LDY fixed_plot_index, X
+	JMP start_right_half
+
+	\\ Haven't tallied up cycle count yet.
+}
+
+\\ These are the Y indices for the pointer to the screen when plotting sprite data
+.fixed_plot_index
+EQUB 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 0
+EQUB 40, 41, 41, 42, 42, 43, 43, 44, 44, 45, 45, 46, 46, 47, 47, 0
+EQUB 80, 81, 81, 82, 82, 83, 83, 84, 84, 85, 85, 86, 86, 87, 87, 0
+EQUB 120, 121, 121, 122, 122, 123, 123, 124, 124, 125, 125, 126, 126, 127, 127, 0
+EQUB 160, 161, 161, 162, 162, 163, 163, 164, 164, 165, 165, 166, 166, 167, 167, 0
+EQUB 200, 201, 201, 202, 202, 203, 203, 204, 204, 205, 205, 206, 206, 207, 207
+EQUB 255, 255
 
 
 \ ******************************************************************
@@ -1037,7 +1237,9 @@ ENDIF
 	BEQ is_timer1
 
 	\\ Acknowledge vsync interrupt
+	IF ENABLE_TIMED_DRAW
 	STA &FE4D						; if we do this then *FX19 stops working!
+	ENDIF
 
 	\\ Set opposite buffers displayed & mapped
 	IF ENABLE_DOUBLE_BUFFER
@@ -1064,7 +1266,11 @@ ENDIF
 	\\ Exit
 	PLA
 	STA &FC
+	IF ENABLE_TIMED_DRAW
 	RTI
+	ELSE
+	JMP (old_irqv)
+	ENDIF
 }
 
 
@@ -1200,6 +1406,8 @@ ENDIF
 	TYA									; 2c
 ;	CLC									; we know carry is clear because carry is never touched
 	ADC #MODE7_char_width				; 2c
+
+	\\ Can probably use a lookup table here for Y indexed by X (0 - 96)
 
 	\\ Have we written 6 bytes?
 	CMP #(6 * MODE7_char_width)			; 2c
@@ -1371,6 +1579,8 @@ ENDIF
 ;	CLC									; we know carry is clear because carry is never touched
 	ADC #MODE7_char_width				; 2c
 
+	\\ Can probably use a lookup table here for Y indexed by X (0 - 96)
+
 	\\ Have we written 6 bytes?
 	CMP #(6 * MODE7_char_width)			; 2c
 	BCC col_loop						; 3c
@@ -1502,18 +1712,19 @@ ENDIF
 
 
 \ ******************************************************************
-\ *	Fast small sprite plot - fixed 4x3 chars
+\ *	Fast small sprite plot - fixed 4x3 chars = 7x7 pixels
 \ * Coordinates plot_x, plot_y assume 4 char boundary
 \ * Call with X = plot_x, Y = plot_y
 \ * No clipping but safe to call outside of visible area
+\ * Probably fairly simple to adapt this to 8x6 chars = 15x16 pixels
 \ ******************************************************************
 
-.plot_fast_mask_loop
+.plot_fast_masked_8e
 {
 	\\ X coordinate to char
-;	LDA plot_x							; 3c
+;	LDA plot_x							;
 ; Now passed in
-	TXA
+	TXA									; 2c
 	LSR A								; 2c
 
 	CMP #PLOT_origin_col				; 2c
@@ -1531,9 +1742,9 @@ ENDIF
 
 	\\ Where are we reading data from?
 
-;	LDA plot_x							; 3c
+;	LDA plot_x							;
 ; Now passed in
-	TXA
+	TXA									; 2c
 	AND #&1								; 2c x_offset
 	ORA mod3_table, Y					; 4c y_offset
 	LSR A								; 2c shift down
@@ -1541,6 +1752,9 @@ ENDIF
 	ORA #&10							; 2c add it back (shifted down)
 	CLC									; 2c
 	.no_x_offset
+
+	\\ Could simplify this if assuming sprite data is page aligned
+
 	ADC plot_data_ptr					; 3c
 	STA sprite_data_addr + 1			; 4c
 	LDA plot_data_ptr+1					; 3c
@@ -1571,6 +1785,8 @@ ENDIF
 	STA screen_load_addr + 2			; 4c
 	STA screen_write_addr + 2			; 4c
 	
+	\\ Could simplify this if assuming sprite data is page aligned
+
 	\\ Mask data lies after sprite data
 	\\ Carry clear after addition above
 	LDA sprite_data_addr + 1			; 4c
@@ -1583,7 +1799,7 @@ ENDIF
 	LDY #0								; 2c
 	LDX #0								; 2c
 
-	\\ Setup overhead = 116c
+	\\ Setup overhead = 114c
 
 	\\ Write 12 bytes...
 	\\ 4 bytes per row x 3 rows
@@ -1599,18 +1815,140 @@ ENDIF
 	STA &7C00, X						; 5c
 
 	INY									; 2c
-	LDX fast_plot_index, Y				; 4c
+	LDX fast_plot_index_8e, Y			; 4c
 	BPL loop							; 3c
 
 	\\ Total for write = 12 x 26c = 312c
-	\\ Overall = 116c + 312c = 428c
+	\\ Overall = 114c + 312c = 426c
 
 	.return
 	RTS
 }
 
-.fast_plot_index
+.fast_plot_index_8e
 EQUB 0, 1, 2, 3, 40, 41, 42, 43, 80, 81, 82, 83, 255 
+
+
+\\ As above but fixed to 16x16 sprite = 8 characters x 6 rows
+
+.plot_fast_masked_16e
+{
+	\\ X coordinate to char
+	TXA									; 2c
+	LSR A								; 2c
+
+	CMP #PLOT_origin_col				; 2c
+	BCS visible_left					; 2c
+
+	.not_visible
+	RTS
+
+	.visible_left
+	\\ If X char outside edge of screen then return
+	CMP #MODE7_char_width - 8			; 2c
+	BCS not_visible						; 2c
+
+	STA plot_char_x						; 3c
+
+	\\ Where are we reading data from?
+
+	TXA									; 2c
+	AND #&1								; 2c x_offset
+	ORA mod3_table, Y					; 4c y_offset
+	LSR A								; 2c shift down
+	BCC no_x_offset						; 3c if x_offset falls into carry
+	ORA #&10							; 2c add it back (shifted down)
+	CLC									; 2c
+	.no_x_offset
+	LSR A: LSR A: LSR A:LSR A			; 8c shift down so is lookup - could simplify this
+
+	TAX									; 2c
+	LDA fast_plot_mult_48, X			; 4c lookup * 48
+
+	\\ Could simplify this if assuming sprite data is page aligned
+
+	ADC plot_data_ptr					; 3c
+	STA sprite_data_addr + 1			; 4c
+	LDA plot_data_ptr+1					; 3c
+	ADC #0								; 2c
+	STA sprite_data_addr + 2			; 4c
+
+	\\ Can now claim X register as finished with plot_x
+
+	\\ Y coordinate to char
+	LDY plot_y							; 3c
+	LDA div3_table, Y					; 4c
+
+	\\ If Y char outside edge of screen then return	
+	CMP #MODE7_char_height - 6			; 2c
+	BCS not_visible						; 2c
+
+	TAX									; 2c - plot_char_y
+
+	\\ Where are we writing to?
+	\\ Carry clear after addition above
+	LDA mode7_row_addr_LO, X			; 4c
+	ADC plot_char_x						; 3c
+	STA screen_load_addr + 1			; 4c
+	STA screen_write_addr + 1			; 4c
+	LDA mode7_row_addr_HI, X			; 4c
+	ADC #0								; 2c
+	STA screen_load_addr + 2			; 4c
+	STA screen_write_addr + 2			; 4c
+	
+	\\ Could simplify this if assuming sprite data is page aligned
+
+	\\ Mask data lies after sprite data
+	\\ Carry clear after addition above
+	LDA sprite_data_addr + 1			; 4c
+	ADC #LO(8 * 6 * 6)					; 2c
+	STA sprite_mask_addr + 1			; 4c
+	LDA sprite_data_addr + 2			; 4c
+	ADC #HI(8 * 6 * 6)					; 2c
+	STA sprite_mask_addr + 2			; 4c
+
+	LDY #0								; 2c
+	LDX #0								; 2c
+
+	\\ Setup overhead = 128c
+
+	\\ Write 48 bytes...
+	\\ 8 bytes per row x 6 rows
+
+	.loop
+	.screen_load_addr
+	LDA &7C00, X						; 4c
+	.sprite_mask_addr
+	AND ball_mask, Y					; 4c
+	.sprite_data_addr
+	ORA ball_data, Y					; 4c
+	.screen_write_addr
+	STA &7C00, X						; 5c
+
+	INY									; 2c
+	LDX fast_plot_index_16e, Y			; 4c
+	CPX #&FF							; 2c
+	BNE loop							; 3c
+
+	\\ Total for write = 48 x 28c = 1344c
+	\\ Overall = 128c + 1344c = 1472c
+
+	.return
+	RTS
+}
+
+.fast_plot_index_16e
+EQUB 0, 1, 2, 3, 4, 5, 6, 7
+EQUB 40, 41, 42, 43, 44, 45, 46, 47
+EQUB 80, 81, 82, 83, 84, 85, 86, 87
+EQUB 120, 121, 122, 123, 124, 125, 126, 127
+EQUB 160, 161, 162, 163, 164, 165, 166, 167
+EQUB 200, 201, 202, 203, 204, 205, 206, 207
+EQUB 255
+
+.fast_plot_mult_48
+EQUB 0, 48, 96, 144, 192, 240
+
 
 \ ******************************************************************
 \ *	Look up tables
@@ -1709,14 +2047,7 @@ EQUS "HELLO WORLD! THIS IS A MESSAGE... 0123456789?-,.   "
 EQUB 0
 
 .whole_y_idx
-EQUB 0
-EQUB 32
-EQUB 64
-EQUB 96
-EQUB 160
-EQUB 160
-EQUB 192
-EQUB 224
+EQUB 0, 32, 64, 96, 160, 160, 192, 224
 
 
 \ ******************************************************************
@@ -1728,6 +2059,13 @@ INCLUDE "font2.6502"
 
 ALIGN &100
 INCLUDE "ball.6502"
+
+ALIGN &100
+INCLUDE "ball15.6502"
+
+ALIGN &100
+INCLUDE "ball15e.6502"
+
 
 \ ******************************************************************
 \ *	End address to be saved

@@ -73,7 +73,7 @@ unsigned char get_mask_char_from_image(int x7, int y7, int x_offset, int y_offse
 	return mask ^ 0xff;
 }
 
-void make_sprite_data(FILE *outfile, const char *label, int pixel_width, int pixel_height, bool swizzle)
+void make_sprite_data(FILE *outfile, const char *label, int pixel_width, int pixel_height, bool swizzle, bool mask)
 {
 	fprintf(outfile, ".%s_data\n", label);
 
@@ -127,17 +127,98 @@ void make_sprite_data(FILE *outfile, const char *label, int pixel_width, int pix
 			fprintf(outfile, "\n");
 		}
 	}
+
+	if (mask)
+	{
+		fprintf(outfile, ".%s_mask\n", label);
+
+		if (swizzle)
+		{
+			for (int x = 0; x < pixel_width; x++)
+			{
+				fprintf(outfile, "EQUB ");
+
+				for (int y = -2; y < pixel_height - 2; y += 3)
+				{
+					if (y != -2)
+					{
+						fprintf(outfile, ",");
+					}
+
+					unsigned char pixels = (get_pixel_from_image(x, y, 0, 0) == 0 ? 16 : 0)
+						+ (get_pixel_from_image(x, y + 1, 0, 0) == 0 ? 8 : 0)
+						+ (get_pixel_from_image(x, y + 2, 0, 0) == 0 ? 4 : 0)
+						+ (get_pixel_from_image(x, y + 3, 0, 0) == 0 ? 2 : 0)
+						+ (get_pixel_from_image(x, y + 4, 0, 0) == 0 ? 1 : 0);
+
+					fprintf(outfile, "%d", pixels);
+				}
+
+				fprintf(outfile, "\n");
+			}
+		}
+		else
+		{
+			for (int y = -2; y < pixel_height - 2; y += 3)
+			{
+				fprintf(outfile, "EQUB ");
+
+				for (int x = 0; x < pixel_width; x++)
+				{
+					if (x != 0)
+					{
+						fprintf(outfile, ",");
+					}
+
+					unsigned char pixels = (get_pixel_from_image(x, y, 0, 0) == 0 ? 16 : 0)
+						+ (get_pixel_from_image(x, y + 1, 0, 0) == 0 ? 8 : 0)
+						+ (get_pixel_from_image(x, y + 2, 0, 0) == 0 ? 4 : 0)
+						+ (get_pixel_from_image(x, y + 3, 0, 0) == 0 ? 2 : 0)
+						+ (get_pixel_from_image(x, y + 4, 0, 0) == 0 ? 1 : 0);
+
+					fprintf(outfile, "%d", pixels);
+				}
+
+				fprintf(outfile, "\n");
+			}
+		}
+	}
 }
 
 void make_six_data(FILE *outfile, const char *label, int char_width, int char_height, int align, bool mask)
 {
+#if 0
+	if (!align)
+	{
+		fprintf(outfile, ".%s_table\n", label);
+
+		fprintf(outfile, ".%s_table_LO\n", label);
+		for (int y_offset = 0; y_offset < 3; y_offset++)
+		{
+			for (int x_offset = 0; x_offset < 2; x_offset++)
+			{
+				fprintf(outfile, "EQUB LO(%s_data_%d%d)\n", label, x_offset, y_offset);
+			}
+		}
+		fprintf(outfile, ".%s_table_HI\n", label);
+		for (int y_offset = 0; y_offset < 3; y_offset++)
+		{
+			for (int x_offset = 0; x_offset < 2; x_offset++)
+			{
+				fprintf(outfile, "EQUB HI(%s_data_%d%d)\n", label, x_offset, y_offset);
+			}
+		}
+		fprintf(outfile, "\\\\ Corresponding mask data is %d bytes following sprite data\n", char_width * char_height * 6);
+	}
+#endif
+
 	fprintf(outfile, ".%s_data\n", label);
 
 	for (int y_offset = 0; y_offset < 3; y_offset++)
 	{
 		for (int x_offset = 0; x_offset < 2; x_offset++)
 		{
-			fprintf(outfile, "; x_offset=%d, y_offset=%d\n", x_offset, y_offset);
+			fprintf(outfile, ".%s_data_%d%d\t; x_offset=%d, y_offset=%d\n", label, x_offset, y_offset, x_offset, y_offset);
 
 			for (int y7 = 0; y7 < char_height; y7++)
 			{
@@ -168,7 +249,7 @@ void make_six_data(FILE *outfile, const char *label, int char_width, int char_he
 		{
 			for (int x_offset = 0; x_offset < 2; x_offset++)
 			{
-				fprintf(outfile, "; x_offset=%d, y_offset=%d\n", x_offset, y_offset);
+				fprintf(outfile, ".%s_mask_%d%d\t; x_offset=%d, y_offset=%d\n", label, x_offset, y_offset, x_offset, y_offset);
 
 				for (int y7 = 0; y7 < char_height; y7++)
 				{
@@ -310,7 +391,7 @@ int main(int argc, char **argv)
 
 				printf("%d at (%d, %d)\n", n, gx, gy);
 
-				make_sprite_data(outfile, gl, pixel_width, pixel_height, swizzle);
+				make_sprite_data(outfile, gl, pixel_width, pixel_height, swizzle, mask);
 			}
 		}
 	}
@@ -322,7 +403,7 @@ int main(int argc, char **argv)
 		}
 		else
 		{
-			make_sprite_data(outfile, label, pixel_width, pixel_height, swizzle);
+			make_sprite_data(outfile, label, pixel_width, pixel_height, swizzle, mask);
 		}
 	}
 
