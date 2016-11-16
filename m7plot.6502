@@ -37,6 +37,7 @@ ENABLE_DOUBLE_BUFFER = FALSE
 ENABLE_CLEAR_SCREEN = TRUE
 ENABLE_KEY_SPRITE = TRUE
 ENABLE_TIMED_DRAW = TRUE
+ENABLE_SEPARATED_RASTERS = FALSE
 
 \ ******************************************************************
 \ *	Define macros (prefer MACRO_* naming?)
@@ -1038,7 +1039,8 @@ RASTER_table_inc = 64
 
 .mode7_raster_fx
 {
-	\\ Clear our old bar
+	\\ Clear our old bars
+
 	LDX raster_idx
 	LDY raster_y_table, X
 
@@ -1046,6 +1048,13 @@ RASTER_table_inc = 64
 	STA teletext_bg_col, Y
 	STA teletext_bg_col+1, Y
 	STA teletext_bg_col+2, Y
+
+	IF ENABLE_SEPARATED_RASTERS
+    LDA #MODE7_contiguous
+	STA teletext_fx, Y
+	STA teletext_fx+1, Y
+	STA teletext_fx+2, Y
+	ENDIF
 
 	TXA
 	CLC
@@ -1058,6 +1067,13 @@ RASTER_table_inc = 64
 	STA teletext_bg_col+1, Y
 	STA teletext_bg_col+2, Y
 	
+	IF ENABLE_SEPARATED_RASTERS
+    LDA #MODE7_contiguous
+	STA teletext_fx, Y
+	STA teletext_fx+1, Y
+	STA teletext_fx+2, Y
+	ENDIF
+
 	TXA
 	CLC
 	ADC #RASTER_table_inc
@@ -1069,12 +1085,22 @@ RASTER_table_inc = 64
 	STA teletext_bg_col+1, Y
 	STA teletext_bg_col+2, Y
 
+	IF ENABLE_SEPARATED_RASTERS
+    LDA #MODE7_contiguous
+	STA teletext_fx, Y
+	STA teletext_fx+1, Y
+	STA teletext_fx+2, Y
+	ENDIF
+
+    \\ Update raster index into table
 
 	LDX raster_idx
 	INX
 	INX
 	STX raster_idx
 	
+    \\ Write our new colour values
+
 	LDY raster_y_table, X
 	LDA #1
 	ORA teletext_bg_col, Y
@@ -1085,6 +1111,13 @@ RASTER_table_inc = 64
 	LDA #1
 	ORA teletext_bg_col+2, Y
 	STA teletext_bg_col+2, Y
+
+	IF ENABLE_SEPARATED_RASTERS
+    LDA #MODE7_separated
+	STA teletext_fx, Y
+	STA teletext_fx+1, Y
+	STA teletext_fx+2, Y
+	ENDIF
 
 	TXA
 	CLC
@@ -1101,6 +1134,13 @@ RASTER_table_inc = 64
 	LDA #2
 	ORA teletext_bg_col+2, Y
 	STA teletext_bg_col+2, Y
+
+	IF ENABLE_SEPARATED_RASTERS
+    LDA #MODE7_separated
+	STA teletext_fx, Y
+	STA teletext_fx+1, Y
+	STA teletext_fx+2, Y
+	ENDIF
 	
 	TXA
 	CLC
@@ -1117,6 +1157,13 @@ RASTER_table_inc = 64
 	LDA #4
 	ORA teletext_bg_col+2, Y
 	STA teletext_bg_col+2, Y
+
+	IF ENABLE_SEPARATED_RASTERS
+    LDA #MODE7_separated
+	STA teletext_fx, Y
+	STA teletext_fx+1, Y
+	STA teletext_fx+2, Y
+	ENDIF
 
 	.return
 	RTS
