@@ -14,6 +14,7 @@ osasci = &FFE3
 osbyte = &FFF4
 osword = &FFF1
 EVENTV = &0220
+IRQ1V = &204
 
 INKEY_esc = 112
 INKEY_w = 33
@@ -24,11 +25,19 @@ INKEY_d = 50
 SEI_OP = $78
 CLI_OP = $58
 NOP_OP = $ea
+BEQ_OP = &F0
+BNE_OP = &D0
 
 \ ******************************************************************
 \ *	Define debug flags (prefer DEBUG_* naming?)
 \ ******************************************************************
 
+ENABLE_ERASE_STARS = TRUE
+ENABLE_DOUBLE_BUFFER = FALSE
+ENABLE_CLEAR_SCREEN = TRUE
+ENABLE_KEY_SPRITE = TRUE
+ENABLE_TIMED_DRAW = TRUE
+ENABLE_SEPARATED_RASTERS = FALSE
 
 \ ******************************************************************
 \ *	Define macros (prefer MACRO_* naming?)
@@ -53,12 +62,17 @@ PLOT_origin_col = 4				; skip first 4 coloumns (col + newbg + col + sep)
 MODE7_texel_width = (MODE7_char_width - PLOT_origin_col) * 2
 MODE7_texel_height = MODE7_char_height * 3
 
+HALF_left_edge_texels = 128 - (MODE7_texel_width / 2)
+HALF_right_edge_texels = 128 + (MODE7_texel_width / 2)
+HALF_top_edge_rows = (129 / 3) - ((MODE7_char_height - 3) / 2)
+HALF_bottom_edge_rows =(129 / 3) + ((MODE7_char_height - 3) / 2)
+
 MIRROR_bottom_row = 24
 MIRROR_top_row = 22
 MIRROR_read_row = MIRROR_top_row - 1
 
 STARS_num = 22
-
+DRAW_timer_ms = 235 * 64				; not sure exactly how MODE 7 is timed but we'll find out :)
 
 \ ******************************************************************
 \ *	Define fast (zero page) runtime variables
@@ -73,23 +87,40 @@ GUARD &A0
 .test_x					SKIP 1
 .test_y					SKIP 1
 
-.plot_ptr				SKIP 2			; ptr to sprite data
+\\ Params are all preserved
 .plot_x					SKIP 1			; x coordinate in pixels
 .plot_y					SKIP 1			; y coordinate in pixels
-.plot_char_w			SKIP 1			; sprite width in chars
-.plot_char_h			SKIP 1			; sprite width in chars
-.plot_x_offset			SKIP 1			; sprite offset x
-.plot_y_offset			SKIP 1			; sprite offset y
+.plot_data_ptr			SKIP 2			; ptr to sprite data
+.plot_data_pitch		SKIP 1			; pitch of sprite data in bytes
+.plot_data_rows			SKIP 1			; number of rows of sprite data
+
+\\ Runtime vars used during plot call
+.plot_pixel_w			SKIP 1			; sprite width in chars
+.plot_row_count			SKIP 1			; number of rows to plot
 .plot_char_x			SKIP 1			; x position in chars absolute
 .plot_char_y			SKIP 1			; y position in chars absolute
-.plot_char_pitch		SKIP 1			; pitch of sprite data in chars
-.plot_diff_x			SKIP 1
-.plot_diff_y			SKIP 1
+
+.plot_data_idx			SKIP 1			; start index into sprite data
+.plot_scr_idx			SKIP 1			; running index for screen write
+.plot_tmp_byte			SKIP 1			; used to combine sprite data
 
 .mirror_byte			SKIP 1
 .mirror_bit				SKIP 1
 
 .raster_idx				SKIP 1
+
+.scrtext_col			SKIP 1
+.scrtext_idx			SKIP 1
+.scrtext_y_idx			SKIP 1
+
+.scrtext_x_offset		SKIP 1
+
+.scrtext_tmp_idx		SKIP 1
+.scrtext_tmp_y			SKIP 1
+
+.old_irqv				SKIP 2
+.double_buffer			SKIP 1
+.draw_signal			SKIP 1
 
 \ ******************************************************************
 \ *	Start address to be saved
@@ -113,34 +144,99 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	\\ Set MODE 7 for memory
 	LDA #22: JSR oswrch
 	LDA #7: JSR oswrch
-	\\ Turn off cursor!
 
-	JSR teletexel_init
+	\\ Turn off cursor!
+	LDA #23: JSR oswrch
+	LDA #1: JSR oswrch
+	LDA #0: JSR oswrch
+	LDA #0: JSR oswrch
+	LDA #0: JSR oswrch
+	LDA #0: JSR oswrch
+	LDA #0: JSR oswrch
+	LDA #0: JSR oswrch
+	LDA #0: JSR oswrch
+	LDA #0: JSR oswrch
+
+	\\ Initialise screen
+
+	JSR teletext_init
+
+	IF ENABLE_DOUBLE_BUFFER
+	LDA &FE34:AND #&4:STA &FE34		; normal RAM main memory
+	JSR teletext_set
+
+	LDA &FE34:ORA #&4:STA &FE34		; shadow RAM main memory
+	ENDIF
+
+	JSR teletext_set
+
+	\\ Initialise systems
+
+	IF ENABLE_ERASE_STARS	
 	JSR mode7_starfield_init
+	ENDIF
+	JSR scrtext_init
+
+	\\ Initialise vars
+
+	LDA #8
+	STA test_x
+	LDA #8
+	STA test_y
 
 	LDA #0
-	STA test_x
-	STA test_y
 	STA raster_idx
+
+	\\ Shadow buffers
+	LDA #&1
+	STA double_buffer
+
+	LDA #0
+	STA draw_signal
+
+	\\ Enable irq
+	{
+		SEI
+		LDA #&7F					; A=01111111
+		STA &FE4E					; R14=Interrupt Enable (disable all interrupts)
+		
+		LDA #&C2					; A=11000010
+		STA &FE4E					; R14=Interrupt Enable (enable main_vsync and timer interrupt)
+		
+		LDA #0						; A=00000000
+		STA &FE4B					; R11=Auxillary Control Register (timer 1 one shot mode)
+
+		LDA IRQ1V:STA old_irqv
+		LDA IRQ1V+1:STA old_irqv+1
+	
+		LDA #LO(irq_handler):STA IRQ1V
+		LDA #HI(irq_handler):STA IRQ1V+1		; set interrupt handler
+		CLI
+	}
 
 	.loop
 
-	\\ Wait for vsync
+	\\ Wait for vsync - in whichever form we choose
+
+	IF ENABLE_TIMED_DRAW
+	LDA draw_signal
+	.wait_for_signal
+	CMP draw_signal
+	BEQ wait_for_signal
+	ELSE
 	LDA #19
 	JSR osbyte
+	ENDIF
 
-	LDA test_x
-	STA plot_x
-	LDA test_y
-	STA plot_y
-	LDA #LO(starhole)
-	STA plot_ptr
-	LDA #HI(starhole)
-	STA plot_ptr+1
+	IF ENABLE_CLEAR_SCREEN
+	JSR mode7_erase_screen
+	ENDIF
 
-;	JSR mode7_erase_sprite
+	;JSR scrtext_poll
+	JSR scrtext_poll_whole
 
-	\\ Check for Escape key
+	\\ Check for keys
+	IF ENABLE_KEY_SPRITE
 	{
 		LDA #121
 		LDX #0
@@ -163,74 +259,45 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 		CPX #INKEY_d
 		BNE not_d
 		INC test_x
+
 		.not_d
 	}
 
-	LDA test_x
-	STA plot_x
-	LDA test_y
-	STA plot_y
-	LDA #LO(starhole)
-	STA plot_ptr
-	LDA #HI(starhole)
-	STA plot_ptr+1
+	LDX test_x
+	STX plot_x
+	LDY test_y
+	STY plot_y
+	LDA #LO(ball15e_data)
+	STA plot_data_ptr
+	LDA #HI(ball15e_data)
+	STA plot_data_ptr+1
+	JSR plot_fast_masked_16e
 
-	JSR mode7_plot_sprite
+;	LDA #LO(font33_data)
+;	STA plot_data_ptr
+;	LDA #HI(font33_data)
+;	STA plot_data_ptr+1
+;	LDA #16
+;	STA plot_data_pitch
+;	LDA #6
+;	STA plot_data_rows
+;	JSR mode7_plot_half
+	ENDIF
 
-	JSR mode7_raster_fx
 	JSR mode7_starfield_fx
+	JSR mode7_raster_fx
+
+	JSR teletext_poll
 	JSR mode7_mirror_fx
 
 	JMP loop
 
 	\\ Until we finish
 	.exit
-
-	RTS
-}
-
-.teletexel_init
-{
-	LDX #0
-
-	.loop
-	LDA mode7_row_addr_LO,X
-	STA writeptr
-	LDA mode7_row_addr_HI,X
-	STA writeptr+1
-	
-	LDY #0
-
-	CPX #MIRROR_top_row
-	BCC not_mirror
-	LDA #MODE7_graphic_black + 4
-	STA (writeptr),Y
-
-	INY
-	LDA #MODE7_new_bg
-	STA (writeptr),Y
-	BNE done_mirror
-
-	.not_mirror
-	LDA #MODE7_graphic_black + 7
-	STA (writeptr),Y
-
-	INY
-	LDA #MODE7_black_bg
-	STA (writeptr),Y
-	
-	.done_mirror
-	INY
-	LDA #MODE7_contiguous
-	STA (writeptr),Y
-
-	INY
-	LDA #MODE7_graphic_black + 7
-	STA (writeptr),Y
-
-	INX
-	CPX #MODE7_char_height
-	BCC loop
+	SEI
+	LDA old_irqv:STA IRQ1V
+	LDA old_irqv+1:STA IRQ1V+1		; set interrupt handler
+	CLI
 
 	.return
 	RTS
@@ -238,304 +305,629 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 
 
 \ ******************************************************************
-\ *	Sprite plot routine
-\ * Want the interface to be something like:
-\ * Sprite data address = plot_ptr
-\ * X coordinate, Y coordinate = plot_x, plot_y
+\ *	Teletext Attribute Handler
 \ ******************************************************************
 
-.mode7_plot_sprite
+.teletext_init
+{
+	LDY #0
+	.loop
+	LDA #0
+	STA teletext_bg_col, Y
+
+	LDA #7
+	STA teletext_fg_col, Y
+
+	LDA #MODE7_contiguous
+	STA teletext_fx, Y
+
+	INY
+	CPY #MIRROR_top_row
+	BCC loop
+
+	.mirror_loop
+	LDA #4
+	STA teletext_bg_col, Y
+
+	LDA #7
+	STA teletext_fg_col, Y
+
+	LDA #MODE7_separated
+	STA teletext_fx, Y
+
+	INY
+	CPY #MODE7_char_height
+	BCC mirror_loop
+
+	.return
+	RTS
+}
+
+.teletext_poll
+{
+	CLC
+
+	\\ Do fg colour
+	FOR y,0,MIRROR_top_row-1,1
+	LDA teletext_fg_col + y
+	ADC #MODE7_graphic_black
+	STA MODE7_base_addr + (y * MODE7_char_width) + 3
+	NEXT
+
+	\\ Do fx char
+	FOR y,0,MIRROR_top_row-1,1
+	LDA teletext_fx + y
+	STA MODE7_base_addr + (y * MODE7_char_width) + 2
+	NEXT
+
+	\\ Do bg col
+	LDX #MODE7_black_bg
+	LDY #MODE7_new_bg
+
+	FOR y,0,MIRROR_top_row-1,1
+	{
+		LDA teletext_bg_col + y
+		BEQ black
+
+		\\ Colour
+		ADC #MODE7_graphic_black
+		STA MODE7_base_addr + (y * MODE7_char_width) + 0
+		STY MODE7_base_addr + (y * MODE7_char_width) + 1
+		BNE done
+
+		.black
+		STX MODE7_base_addr + (y * MODE7_char_width) + 1
+
+		.done
+	}
+	NEXT
+
+	.return
+	RTS
+}
+
+.teletext_set
+{
+	JSR teletext_poll
+
+	\\ Do fg colour
+	FOR y,MIRROR_top_row,MODE7_char_height-1,1
+	LDA teletext_fg_col + y
+	ADC #MODE7_graphic_black
+	STA MODE7_base_addr + (y * MODE7_char_width) + 3
+	NEXT
+
+	\\ Do fx char
+	FOR y,MIRROR_top_row,MODE7_char_height-1,1
+	LDA teletext_fx + y
+	STA MODE7_base_addr + (y * MODE7_char_width) + 2
+	NEXT
+
+	\\ Do bg col
+	LDY #MODE7_new_bg
+
+	FOR y,MIRROR_top_row,MODE7_char_height-1,1
+	{
+		LDA teletext_bg_col + y
+
+		\\ Colour
+		ADC #MODE7_graphic_black
+		STA MODE7_base_addr + (y * MODE7_char_width) + 0
+		STY MODE7_base_addr + (y * MODE7_char_width) + 1
+	}
+	NEXT
+
+	.return
+	RTS
+}
+
+.mode7_timer_bar
+{
+	lda #MODE7_new_bg
+FOR n, 0, MODE7_char_height - 1
+	sta MODE7_base_addr + n * MODE7_char_width + (MODE7_char_width - 1)
+NEXT
+	rts
+}
+
+\ ******************************************************************
+\ *	MODE 7 sprite plot routine
+\ * Sprite data address = plot_data_ptr
+\ * X coordinate (128=centre) = plot_x
+\ * Y coordinate (129=centre) = plot_y
+\ * Sprite data pitch (row length in bytes) = plot_data_pitch
+\ * Number rows of sprite data = plot_data_rows
+\ * NB. These are preserved between calls so can be reused
+\ ******************************************************************
+
+.mode7_plot_full_clipped
 {
 	\\ Zero any temporary variables
 	LDY #0
-	STY plot_diff_x
-	STY plot_diff_y
+	STY plot_data_idx
 
-	\\ Copy width and height in chars (bytes)
-	LDA (plot_ptr),Y
-	STA plot_char_w
-	STA plot_char_pitch				; store pitch
-	INY
-	LDA (plot_ptr),Y
-	STA plot_char_h
-
-	\\ Calculate x,y offset from coordinates
-	LDA plot_x
-	AND #1
-	STA plot_x_offset
-
-	\\ Calculate absolute x,y character pos from coordinates
-	LDA plot_x
-	BPL no_clip_left
-
-	\\ x < 0
-	\\ Make positive
-	EOR #&FF						; flip bits + 1
-	CLC
-	ADC #2							; add 1 as as need to correctly round to chars
-	LSR A							; div 2
-	STA plot_diff_x					; this is the diff to clip in chars
-
-	\\ Reduce width by diff			
+	\\ Copy width in pixels and height in chars (bytes)
 	SEC
-	LDA plot_char_w
-	SBC plot_diff_x					; could just add this
-	BPL visible_left				; w - x < 0 so plot position is off screen
+	LDA plot_data_pitch
+	SBC #1									; w = pitch - 1
+	STA plot_pixel_w
 
-	.jump_not_visible
-	JMP not_visible					; stupid branch range
+	LDA plot_data_rows
+	STA plot_row_count
+
+	\\ X calcs
+
+	\\ Check X against right edge
+	LDA plot_x
+	CMP #HALF_right_edge_texels
+	BCC is_visible_right
 	
-	.visible_left
-	STA plot_char_w
+	.not_visible
+	RTS
 
-	\\ Reset x
-	LDA #0							; x=0
+	.is_visible_right
+	\\ Check X against left edge
+	CMP #HALF_left_edge_texels
+	BCS no_left_clip
 
-	.no_clip_left
-	LSR A							; relative
+	\\ Check X+W against left edge
+	ADC plot_pixel_w
+	CMP #HALF_left_edge_texels + 1		; need an extra texel because we plot in 2 columns
+	BCC not_visible
+
+	\\ Clip left side
+	\\ Don't need to set width as this is actually an index check
+	\\ But do need to specify index to look up into sprite data
+	SEC
+	LDA #HALF_left_edge_texels
+	SBC plot_x
+	STA plot_data_idx
+
+	\\ Set X to left edge
+	LDA #HALF_left_edge_texels
+	STA plot_x
+
+	.no_left_clip
+	\\ Check X+W against right edge
 	CLC
-	ADC #PLOT_origin_col			; make absolute
+	ADC plot_pixel_w
+	CMP #HALF_right_edge_texels
+	BCC no_right_clip
+
+	\\ Set width to right edge
+	\\ W = right edge - X
+	LDA #HALF_right_edge_texels
+	SBC plot_x
+	STA plot_pixel_w
+
+	.no_right_clip
+
+	\\ Character pos X
+	SEC
+	LDA plot_x
+	SBC #HALF_left_edge_texels - (PLOT_origin_col * 2)
+	LSR A
 	STA plot_char_x
 
-	\\ Check if not visible
-	CMP #MODE7_char_width
-	BCS jump_not_visible			; x > 40 so plot position is off screen
+	\\ Need sprite data here because Y clip will update sprite pointer
 
-	\\ Now test for right clip by adding width
-	CLC
-	ADC plot_char_w
-	CMP #MODE7_char_width
-	BCC no_clip_right
+	\\ Read address start of sprite data - can get caller to set this?
+	LDA plot_data_ptr
+	STA readptr
+	LDA plot_data_ptr+1
+	STA readptr+1
 
-	\\ Is over width of screen
-	; Carry set
-	LDA #MODE7_char_width
-	SBC plot_char_x
-	STA plot_char_w					; clip width = 40 - x
+	\\ Convert texel coordinates to chars and clip in this space
 
-	.no_clip_right
-
-	\\ Look up y coordinate
+	\\ Y calcs
 	LDY plot_y
-
 	LDA mod3_table, Y
-	STA plot_y_offset
+	STA plot_y_offset + 1				; ** MODIFIES CODE
 
-	\\ y < 0?
-	TYA
-	BPL no_clip_top
-
-	\\ Make positive
-
-	EOR #&FF					; flip the bits +1 then -1
-	TAY
-
-	CLC
-	LDA div3_table, Y			; char row = y DIV 3
-	ADC #1						; when negative need one more char row`
-	STA plot_diff_y
-
-	SEC
-	LDA plot_char_h
-	SBC plot_diff_y				; subtract clipped character rows from height
-	STA plot_char_h
-
-	BEQ jump_not_visible		; if h <= 0 then not visible
-	BMI jump_not_visible
-
-	LDY #0
-
-	.no_clip_top
 	LDA div3_table, Y
 	STA plot_char_y
 
-	\\ Check if not visible off bottom
-	CMP #MODE7_char_height
-	BCS jump_not_visible			; y > 25 so plot position is off screen
+	\\ Check char Y against bottom edge	
+	CMP #HALF_bottom_edge_rows
+	BCS not_visible
 
-	\\ Now test for bottom clip by adding height
-	CLC
-	ADC plot_char_h
-	CMP #MODE7_char_height
-	BCC no_clip_bottom
+	\\ Check char Y against top edge
+	CMP #HALF_top_edge_rows
+	BCS no_clip_top
 
-	\\ Is over height of screen
-	; Carry set
-	LDA #MODE7_char_height
+	\\ Check Y + H against top edge
+	ADC plot_row_count
+	CMP #HALF_top_edge_rows + 1
+	BCC not_visible
+
+	\\ Clip against top edge
+	SEC
+	LDA #HALF_top_edge_rows
 	SBC plot_char_y
-	STA plot_char_h					; clip height = 25 - y
+	TAX
 
-	.no_clip_bottom
+	\\ TODO - make this loop more optimal
+
+	\\ Need to update start index into sprite data
+	.increment_top_row
+	{
+		CLC
+		LDA readptr
+		ADC plot_data_pitch				; CONST!
+		STA readptr
+		BCC no_carry
+		INC readptr+1
+		.no_carry
+	}
+
+	\\ And reduce number of rows left to actually plot
+	DEC plot_row_count
+
+	\\ H -= top edge - Y
+	DEX
+	BNE increment_top_row
+
+	\\ Set Y to top edge
+	LDA #HALF_top_edge_rows
+	STA plot_char_y
+
+	.no_clip_top
+	\\ Check Y + H against bottom edge
+	ADC plot_row_count
+	CMP #HALF_bottom_edge_rows + 1
+	BCC no_bottom_clip
+	
+	\\ Set height to bottom edge
+	\\ H = bottom edge - Y
+	LDA #HALF_bottom_edge_rows
+	SBC plot_char_y
+	STA plot_row_count
+
+	.no_bottom_clip
 
 	\\ Calculate screen address from coordinates
-	LDY plot_char_y
+	SEC
+	LDA plot_char_y
+	SBC #HALF_top_edge_rows
+	TAY
 
 	\\ Look up address of row from y coordinates
 	CLC
-	LDA mode7_row_addr_LO,Y
+	LDA mode7_row_addr_LO, Y
 	ADC plot_char_x
-	STA store_screen_addr+1			; ** MODIFIES CODE
-	LDA mode7_row_addr_HI,Y
+	STA screen_write_addr+1
+	LDA mode7_row_addr_HI, Y
 	ADC #0
-	STA store_screen_addr+2			; ** MODIFIES CODE
+	STA screen_write_addr+2
 
-	\\ Locate sprite data = x_offset*6 + y_offset*2 - ick
-	CLC
-	LDA plot_x_offset
-	BEQ x_offset_zero
-	LDA #6							; 3x y offsets * 2x bytes
-	.x_offset_zero
-	ADC plot_y_offset
-	ADC plot_y_offset
-	ADC #2							; skip w & h bytes
+	\\ Set up left & right side table indices - could pre-calc the shift
+	.plot_y_offset
+	LDA #0								; ** SELF-MODIFIED CODE
+;	ASL A: ASL A: ASL A: ASL A: ASL A: ASL A	; now pre-shifted
+;	CLC: ROR A: ROR A: ROR A			; or can be pre-shifted
+	STA plot_half_left+1				; ** MODIFIES CODE		
 
-	TAY
+	ORA #&20
+	STA plot_half_right+1				; ** MODIFIES CODE
 
-	\\ Then read off the data address LO & HI - mmph
-	CLC
-	LDA (plot_ptr),Y
-	ADC plot_diff_x					; offset into sprite data for clip
-	STA load_sprite_data+1
-	INY
-	LDA (plot_ptr),Y
-	STA load_sprite_data+2
-
-	\\ If we're clipped off the top we need to start from inside the sprite data
-	{
-		LDY plot_diff_y
-		.loop
-		BEQ done
-		CLC
-		LDA load_sprite_data+1
-		ADC plot_char_pitch
-		STA load_sprite_data+1
-		LDA load_sprite_data+2
-		ADC #0
-		STA load_sprite_data+2
-		DEY
-		BNE loop
-		.done
-	}
+	\\ Determine x offset (0 or 1) start on left or right hand column of byte
+	LDX #BEQ_OP							; BEQ opcode
+	LDA plot_x							; CONST!
+	AND #1
+	BNE x_offset_one
+	LDX #BNE_OP							; BNE opcode
+	.x_offset_one
+	STX branch_right_half				; ** MODIFIES CODE
 
 	\\ Plot loop
-
-	\\ For each row
-	LDY plot_char_h
 	.y_loop
+	LDY plot_data_idx					; 3c - index into sprite data
 
-	\\ Plot all chars
-	LDX #0							; start at left clip
+	LDX #0								; 2c
+	STX plot_scr_idx					; 3c - index across screen row
+	STX plot_tmp_byte					; 3c
+
+	\\ Relies on zero value above
+	\\ At the start of every row we always do left or right column of byte first
+	\\ So just poke the relevant branch instruction in beforehand
+	; BEQ start_right_half				; when plot_x & 1 == 1 (x_offset = 1) zero flag so always taken -> right
+	; BNE start_right_half				; when plot_x & 1 == 0 (x_offset = 0) zero flag so never taken -> left
+	.branch_right_half
+	BEQ start_right_half				; 3c - ** SELF-MODIFIED CODE
+
 	.x_loop
-	CPX plot_char_w
-	BCS done_x_loop
-	.load_sprite_data
-	LDA end,X						; ** SELF-MODIFIED CODE
-	.store_screen_addr
-	STA &7C00,X						; ** SELF-MODIFIED CODE
-	INX
-	JMP x_loop
 
-	.done_x_loop
-	DEY
-	BEQ done_y_loop
+	\\ Get left column of sprite data
+	LDA (readptr), Y					; 6c
 
-	\\ Next line
-	CLC
-	LDA store_screen_addr+1
-	ADC #MODE7_char_width			; screen pitch
-	STA store_screen_addr+1
-	LDA store_screen_addr+2
-	ADC #0
-	STA store_screen_addr+2
+	\\ Turn this into MODE 7 gfx code for left column
+	.plot_half_left
+	ORA #&00         					; where left_header = yy0 00000 - ** SELF-MODIFIED CODE
+	TAX									; 2c + 2c
+	LDA half_column_lookup, X			; 4c
+
+	\\ Store it
+	STA plot_tmp_byte					; 3c - could write into later code? (any saving?)
+
+	\\ Get right column of sprite data
+	INY									; 2c
+
+	.start_right_half
+	LDA (readptr), Y					; 6c
+
+	\\ Turn this into MODE 7 gfx code for right column
+	.plot_half_right
+	ORA #&20			        		; where right_header = yy1 00000 - ** SELF-MODIFIED CODE
+	TAX									; 2c + 2c
+	LDA half_column_lookup, X			; 4c
+
+	\\ Combine it with left column
+	ORA plot_tmp_byte       			; 3c - mask in other half
+
+	\\ Write combined columns to screen	
+	LDX plot_scr_idx					; 3c
+	.screen_write_addr
+	STA &7C00, X						; 5c - write to screen - ** SELF-MODIFIED CODE
+
+	\\ For masked sprite would need:
+	\\ ORA &7C00, X						; 4c
+	\\ But also need to update both addresses in outer loop
 	
-	\\ Next data - gah this is continuous
-	CLC
-	LDA load_sprite_data+1
-	ADC plot_char_pitch				; sprite pitch
-	STA load_sprite_data+1
-	LDA load_sprite_data+2
-	ADC #0
-	STA load_sprite_data+2
+	INX									; 2c
+	STX plot_scr_idx					; 3c
 
-	JMP y_loop
-	.done_y_loop
-	.not_visible
+	\\ ALT (mod code) ~= STA abs (4c) INC abs (6c) BCC (3c) = 13c vs 13c
+
+	\\ Have we reached end of columns?
+	INY									; 2c
+	CPY plot_pixel_w					; 3c - CONST! - could be poked into memory for CPY #imm
+	BCC x_loop							; 3c
+
+	\\ Cycle count = 57 per character byte written to screen
+	\\ E.g. 32 pixel width = 16 characters = 912 cycles minimum
+
+	\\ Have we reached end of rows?
+	DEC plot_row_count					; 5c
+	BEQ return							; 2c
+
+	\\ Next line on screen
+	{
+		CLC								; 2c
+		LDA screen_write_addr+1			; 4c
+		ADC #MODE7_char_width			; 2c - screen pitch
+		STA screen_write_addr+1			; 4c
+		BCC no_carry					; 3c
+		INC screen_write_addr+2			; 6c
+		.no_carry
+	}
+
+	\\ Next line of sprite data - is contiguous but > 256 bytes 
+	{
+		CLC								; 2c
+		LDA readptr						; 3c
+		ADC plot_data_pitch				; 3c - CONST!
+		STA readptr						; 3c
+		BCC no_carry					; 3c
+		INC readptr+1					; 5c
+		.no_carry
+	}
+	
+	JMP y_loop							; 3c
+
+	\\ Cycle count = 64 overhead per character row written to screen
+	\\ E.g. 32 pixel height = 11 character rows = 704 cycles
+
+	\\ So overall 32 x 32 full sprite plot (NO MASK!) = ((57 * 16) + 64) * 11 = 10,736 cycles :S
+	\\ So overall 16 x 16 full sprite plot (NO MASK!) = ((57 * 8) + 64) * 6 = 3,120 cycles :S
 
 	.return
 	RTS
 }
 
-IF 0
-.mode7_erase_sprite
+\\ 16x16 sprite only but using column encoded data
+.mode7_plot_masked_16c
 {
-	\\ Copy width and height in chars (bytes)
-	LDY #0
-	LDA (plot_ptr),Y
-	STA plot_char_w
-	INY
-	LDA (plot_ptr),Y
-	STA plot_char_h
+	\\ X coordinate to char
+	LDA plot_x							; 3c
+	LSR A								; 2c
 
-	\\ Calculate screen address from coordinates
+	CMP #PLOT_origin_col				; 2c
+	BCS visible_left					; 2c
 
-	\\ Look up address of row from y coordiante
-	LDY plot_y
-	LDA div3_table, Y
-	TAY
+	.not_visible
+	RTS
 
-	LDA mode7_row_addr_LO,Y
-	STA writeptr
-	LDA mode7_row_addr_HI,Y
-	STA writeptr+1
-	
-	\\ Divide x coordinate by 2 for colum
-	LDA plot_x
-	LSR A							; x offset in carry
+	.visible_left
+	\\ If X char outside edge of screen then return
+	CMP #MODE7_char_width - 8			; 2c
+	BCS not_visible						; 2c
 
-	\\ Add column to writeptr
+	STA plot_char_x						; 3c
+
+	\\ Y coordinate to char
+	LDY plot_y							; 3c
+	LDA div3_table, Y					; 4c
+
+	\\ If Y char outside edge of screen then return	
+	CMP #MODE7_char_height - 6			; 2c
+	BCS not_visible						; 2c
+
+	STA plot_char_y						; 3c
+
+	\\ Where are we reading data from?
+
+	LDA plot_data_ptr
+	STA read_sprite_ptr1 + 1
+	STA read_sprite_ptr2 + 1
 	CLC
-	ADC writeptr
-	ADC #PLOT_origin_col
-	STA store_screen_addr+1			; ** MODIFIES CODE
-	LDA writeptr+1
+	ADC #(6 * 16)
+	STA read_mask_ptr1 + 1
+	STA read_mask_ptr2 + 1
+	\\ Carry maybe set
+	LDA plot_data_ptr+1
+	STA read_sprite_ptr1 + 2
+	STA read_sprite_ptr2 + 2
 	ADC #0
-	STA store_screen_addr+2			; ** MODIFIES CODE
+	STA read_mask_ptr1 + 2
+	STA read_mask_ptr2 + 2
 
-	\\ Plot loop
+	\\ Where are we writing to?
+	LDX plot_char_y
 
-	\\ For each row
-	LDY plot_char_h
-	.y_loop
+	CLC
+	LDA mode7_row_addr_LO, X			; 4c
+	ADC plot_char_x						; 3c
+	STA writeptr						; 3c
+	LDA mode7_row_addr_HI, X			; 4c
+	ADC #0								; 2c
+	STA writeptr+1						; 3c
 
-	\\ Plot all chars
+	\\ Run time tweaks
+
+	LDA mod3_table, Y					; 4c y_offset
+	STA plot_half_left + 1				; ** MODIFIES CODE		
+	STA mask_half_left + 1				; ** MODIFIES CODE		
+	ORA #&20
+	STA plot_half_right + 1				; ** MODIFIES CODE
+	STA mask_half_right + 1				; ** MODIFIES CODE
+
+	.start_plot
+	\\ Plot all bytes
 	LDX #0
-	LDA #0
-	.x_loop
-	.store_screen_addr
-	STA &7C00,X						; ** SELF-MODIFIED CODE
+	STX lookup_addr1 + 1				; 2c + 4c - ** MODIFIES CODE
+
+	LDY #0
+
+	\\ Start left or right column
+	LDA plot_x
+	AND #&1
+	BNE start_right_half
+
+	.loop
+
+	\\ Read mask data
+
+	.read_mask_ptr1
+	LDA &1000, X
+	\\ Turn this into MODE 7 gfx code for left column
+	.mask_half_left
+	ORA #&00         					; where left_header = yy0 00000 - ** SELF-MODIFIED CODE
+	STA lookup_mask1 + 1				; 2c + 4c - ** MODIFIES CODE
+
+	\\ Read sprite data
+
+	.read_sprite_ptr1
+	LDA &2000, X
+	\\ Turn this into MODE 7 gfx code for left column
+	.plot_half_left
+	ORA #&00         					; where left_header = yy0 00000 - ** SELF-MODIFIED CODE
+	STA lookup_addr1 + 1				; 2c + 4c - ** MODIFIES CODE
+
+	\\ Get right column of sprite data...
+	INX									; 2c
+
+
+	\\ Right column of byte
+
+	.start_right_half
+
+	.read_mask_ptr2
+	LDA &1000, X
+
+	\\ Turn this into MODE 7 gfx code for right column
+	.mask_half_right
+	ORA #&20			        		; where right_header = yy1 00000 - ** SELF-MODIFIED CODE
+	STA lookup_mask2 + 1				; 2c + 4c - ** MODIFIES CODE
+	.lookup_mask2
+	LDA half_column_lookup				; 4c - ** SELF-MODIFIED CODE
+
+	\\ Combine it with left column
+	.lookup_mask1
+	ORA half_column_lookup				; 4c - ** SELF-MODIFIED CODE
+
+	\\ Mask screen byte
+	AND (writeptr), Y
+	STA masked_byte + 1
+
+	.read_sprite_ptr2
+	LDA &2000, X
+
+	\\ Turn this into MODE 7 gfx code for right column
+	.plot_half_right
+	ORA #&20			        		; where right_header = yy1 00000 - ** SELF-MODIFIED CODE
+	STA lookup_addr2 + 1				; 2c + 4c - ** MODIFIES CODE
+	.lookup_addr2
+	LDA half_column_lookup				; 4c - ** SELF-MODIFIED CODE
+
+	\\ Combine it with left column
+	.lookup_addr1
+	ORA half_column_lookup				; 4c - ** SELF-MODIFIED CODE
+
+	\\ For mask...
+	.masked_byte
+	ORA #0			; masked_byte`
+
+	\\ Write combined columns to screen	
+	STA (writeptr), Y
+
+	\\ Next byte of data
 	INX
-	CPX plot_char_w
-	BNE x_loop
-
-	DEY
-	BEQ done
-
-	\\ Next line
-	CLC
-	LDA store_screen_addr+1
-	ADC #MODE7_char_width
-	STA store_screen_addr+1
-	LDA store_screen_addr+2
-	ADC #0
-	STA store_screen_addr+2
 	
-	JMP y_loop
-	.done
+	\\ Look up where this should go (faster than calculating it)
+	LDY fixed_plot_index, X
+
+	\\ Awkward check for odd number of columns
+	BEQ skip_last_column 
+
+	\\ Loop until finished
+	CPY #&FF
+	BNE loop
+
+	.return
+	RTS
+
+	\\ Bit of a hack to just drop the last column of our sprite data when x_offset = 1
+	.skip_last_column
+	STY lookup_addr1 + 1				; 2c + 4c - ** MODIFIES CODE
+	LDA #31								; 31 is mask for everything
+	STA lookup_mask1 + 1
+	INX
+	LDY fixed_plot_index, X
+	JMP start_right_half
+
+	\\ Haven't tallied up cycle count yet.
+}
+
+\\ These are the Y indices for the pointer to the screen when plotting sprite data
+.fixed_plot_index
+EQUB 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 0
+EQUB 40, 41, 41, 42, 42, 43, 43, 44, 44, 45, 45, 46, 46, 47, 47, 0
+EQUB 80, 81, 81, 82, 82, 83, 83, 84, 84, 85, 85, 86, 86, 87, 87, 0
+EQUB 120, 121, 121, 122, 122, 123, 123, 124, 124, 125, 125, 126, 126, 127, 127, 0
+EQUB 160, 161, 161, 162, 162, 163, 163, 164, 164, 165, 165, 166, 166, 167, 167, 0
+EQUB 200, 201, 201, 202, 202, 203, 203, 204, 204, 205, 205, 206, 206, 207, 207
+EQUB 255, 255
+
+
+\ ******************************************************************
+\ *	Clear screen FX
+\ ******************************************************************
+
+IF ENABLE_CLEAR_SCREEN
+.mode7_erase_screen
+{
+	LDA #32
+	FOR y,10,21,1			; 0,22
+	FOR x,PLOT_origin_col,MODE7_char_width-1,1
+	STA MODE7_base_addr + (y * MODE7_char_width) + x
+	NEXT
+	NEXT
 
 	.return
 	RTS
 }
 ENDIF
+
 
 \ ******************************************************************
 \ *	Mirror FX
@@ -643,124 +1035,135 @@ MIRROR_write_row2_addr = (MODE7_base_addr + ((MIRROR_top_row+2) * MODE7_char_wid
 
 RASTER_centre_row = 11
 RASTER_wave_rows = 6
-RASTER_table_inc = 8
-RASTER_row0_addr = (MODE7_base_addr + ((RASTER_centre_row-6) * MODE7_char_width))
-RASTER_row1_addr = (MODE7_base_addr + ((RASTER_centre_row-5) * MODE7_char_width))
-RASTER_row2_addr = (MODE7_base_addr + ((RASTER_centre_row-4) * MODE7_char_width))
-RASTER_row3_addr = (MODE7_base_addr + ((RASTER_centre_row-3) * MODE7_char_width))
-RASTER_row4_addr = (MODE7_base_addr + ((RASTER_centre_row-2) * MODE7_char_width))
-RASTER_row5_addr = (MODE7_base_addr + ((RASTER_centre_row-1) * MODE7_char_width))
-RASTER_row6_addr = (MODE7_base_addr + ((RASTER_centre_row-0) * MODE7_char_width))
-RASTER_row7_addr = (MODE7_base_addr + ((RASTER_centre_row+1) * MODE7_char_width))
-RASTER_row8_addr = (MODE7_base_addr + ((RASTER_centre_row+2) * MODE7_char_width))
-RASTER_row9_addr = (MODE7_base_addr + ((RASTER_centre_row+3) * MODE7_char_width))
-RASTER_row10_addr = (MODE7_base_addr + ((RASTER_centre_row+4) * MODE7_char_width))
-RASTER_row11_addr = (MODE7_base_addr + ((RASTER_centre_row+5) * MODE7_char_width))
-RASTER_row12_addr = (MODE7_base_addr + ((RASTER_centre_row+6) * MODE7_char_width))
+RASTER_table_inc = 64
 
 .mode7_raster_fx
 {
-	LDA #MODE7_black_bg
-	STA RASTER_row0_addr+1
-	STA RASTER_row1_addr+1
-	STA RASTER_row2_addr+1
-	STA RASTER_row3_addr+1
-	STA RASTER_row4_addr+1
-	STA RASTER_row5_addr+1
-	STA RASTER_row6_addr+1
-	STA RASTER_row7_addr+1
-	STA RASTER_row8_addr+1
-	STA RASTER_row9_addr+1
-	STA RASTER_row10_addr+1
-	STA RASTER_row11_addr+1
-	STA RASTER_row12_addr+1
+	\\ Clear our old bars
 
 	LDX raster_idx
-	LDA raster_y_table, X
-	TAY
-	LDA mode7_row_addr_LO,Y
-	STA writeptr
-	LDA mode7_row_addr_HI,Y
-	STA writeptr+1
-	LDY #0
-	LDA #MODE7_graphic_black + 1
-	STA (writeptr),Y
-	INY
-	LDA #MODE7_new_bg
-	STA (writeptr),Y
+	LDY raster_y_table, X
 
-	TXA:CLC:ADC #RASTER_table_inc:TAX
-	LDA raster_y_table, X
-	TAY
-	LDA mode7_row_addr_LO,Y
-	STA writeptr
-	LDA mode7_row_addr_HI,Y
-	STA writeptr+1
-	LDY #0
-	LDA #MODE7_graphic_black + 2
-	STA (writeptr),Y
-	INY
-	LDA #MODE7_new_bg
-	STA (writeptr),Y
+	LDA #0
+	STA teletext_bg_col, Y
+	STA teletext_bg_col+1, Y
+	STA teletext_bg_col+2, Y
 
-	TXA:CLC:ADC #RASTER_table_inc:TAX
-	LDA raster_y_table, X
-	TAY
-	LDA mode7_row_addr_LO,Y
-	STA writeptr
-	LDA mode7_row_addr_HI,Y
-	STA writeptr+1
-	LDY #0
-	LDA #MODE7_graphic_black + 3
-	STA (writeptr),Y
-	INY
-	LDA #MODE7_new_bg
-	STA (writeptr),Y
+	IF ENABLE_SEPARATED_RASTERS
+    LDA #MODE7_contiguous
+	STA teletext_fx, Y
+	STA teletext_fx+1, Y
+	STA teletext_fx+2, Y
+	ENDIF
 
-	TXA:CLC:ADC #RASTER_table_inc:TAX
-	LDA raster_y_table, X
-	TAY
-	LDA mode7_row_addr_LO,Y
-	STA writeptr
-	LDA mode7_row_addr_HI,Y
-	STA writeptr+1
-	LDY #0
-	LDA #MODE7_graphic_black + 4
-	STA (writeptr),Y
-	INY
-	LDA #MODE7_new_bg
-	STA (writeptr),Y
+	TXA
+	CLC
+	ADC #RASTER_table_inc
+	TAX
+	LDY raster_y_table, X
 
-	TXA:CLC:ADC #RASTER_table_inc:TAX
-	LDA raster_y_table, X
-	TAY
-	LDA mode7_row_addr_LO,Y
-	STA writeptr
-	LDA mode7_row_addr_HI,Y
-	STA writeptr+1
-	LDY #0
-	LDA #MODE7_graphic_black + 5
-	STA (writeptr),Y
-	INY
-	LDA #MODE7_new_bg
-	STA (writeptr),Y
+	LDA #0
+	STA teletext_bg_col, Y
+	STA teletext_bg_col+1, Y
+	STA teletext_bg_col+2, Y
+	
+	IF ENABLE_SEPARATED_RASTERS
+    LDA #MODE7_contiguous
+	STA teletext_fx, Y
+	STA teletext_fx+1, Y
+	STA teletext_fx+2, Y
+	ENDIF
 
-	TXA:CLC:ADC #RASTER_table_inc:TAX
-	LDA raster_y_table, X
-	TAY
-	LDA mode7_row_addr_LO,Y
-	STA writeptr
-	LDA mode7_row_addr_HI,Y
-	STA writeptr+1
-	LDY #0
-	LDA #MODE7_graphic_black + 6
-	STA (writeptr),Y
-	INY
-	LDA #MODE7_new_bg
-	STA (writeptr),Y
+	TXA
+	CLC
+	ADC #RASTER_table_inc
+	TAX
+	LDY raster_y_table, X
 
-	INC raster_idx
-	INC raster_idx
+	LDA #0
+	STA teletext_bg_col, Y
+	STA teletext_bg_col+1, Y
+	STA teletext_bg_col+2, Y
+
+	IF ENABLE_SEPARATED_RASTERS
+    LDA #MODE7_contiguous
+	STA teletext_fx, Y
+	STA teletext_fx+1, Y
+	STA teletext_fx+2, Y
+	ENDIF
+
+    \\ Update raster index into table
+
+	LDX raster_idx
+	INX
+	INX
+	STX raster_idx
+	
+    \\ Write our new colour values
+
+	LDY raster_y_table, X
+	LDA #1
+	ORA teletext_bg_col, Y
+	STA teletext_bg_col, Y
+	LDA #1
+	ORA teletext_bg_col+1, Y
+	STA teletext_bg_col+1, Y
+	LDA #1
+	ORA teletext_bg_col+2, Y
+	STA teletext_bg_col+2, Y
+
+	IF ENABLE_SEPARATED_RASTERS
+    LDA #MODE7_separated
+	STA teletext_fx, Y
+	STA teletext_fx+1, Y
+	STA teletext_fx+2, Y
+	ENDIF
+
+	TXA
+	CLC
+	ADC #RASTER_table_inc
+	TAX
+	LDY raster_y_table, X
+
+	LDA #2
+	ORA teletext_bg_col, Y
+	STA teletext_bg_col, Y
+	LDA #2
+	ORA teletext_bg_col+1, Y
+	STA teletext_bg_col+1, Y
+	LDA #2
+	ORA teletext_bg_col+2, Y
+	STA teletext_bg_col+2, Y
+
+	IF ENABLE_SEPARATED_RASTERS
+    LDA #MODE7_separated
+	STA teletext_fx, Y
+	STA teletext_fx+1, Y
+	STA teletext_fx+2, Y
+	ENDIF
+	
+	TXA
+	CLC
+	ADC #RASTER_table_inc
+	TAX
+	LDY raster_y_table, X
+
+	LDA #4
+	ORA teletext_bg_col, Y
+	STA teletext_bg_col, Y
+	LDA #4
+	ORA teletext_bg_col+1, Y
+	STA teletext_bg_col+1, Y
+	LDA #4
+	ORA teletext_bg_col+2, Y
+	STA teletext_bg_col+2, Y
+
+	IF ENABLE_SEPARATED_RASTERS
+    LDA #MODE7_separated
+	STA teletext_fx, Y
+	STA teletext_fx+1, Y
+	STA teletext_fx+2, Y
+	ENDIF
 
 	.return
 	RTS
@@ -773,9 +1176,10 @@ RASTER_row12_addr = (MODE7_base_addr + ((RASTER_centre_row+6) * MODE7_char_width
 
 STARS_row0_addr = (MODE7_base_addr + ((0) * MODE7_char_width))
 
+IF ENABLE_ERASE_STARS
 .mode7_starfield_init
 {
-	LDA #0
+	LDA #32
 
 	LDY #STARS_num-1
 	.loop
@@ -786,6 +1190,7 @@ STARS_row0_addr = (MODE7_base_addr + ((0) * MODE7_char_width))
 	.return
 	RTS
 }
+ENDIF
 
 .mode7_starfield_fx
 {
@@ -798,12 +1203,20 @@ STARS_row0_addr = (MODE7_base_addr + ((0) * MODE7_char_width))
 	.loop
 
 	\\ Erase old star
+	IF ENABLE_ERASE_STARS
+	CPX #10
+	BCS no_erase			; only erase top 10 lines as scrolltext blats this anyway
+
 	LDA stars_table_byte,X
 	CMP #32
 	BNE no_erase
+	
 	LDA stars_table_x,X
-	LSR A:LSR A:TAY:LDA #32
+	LSR A:LSR A:TAY
+	
+	LDA #32
 	STA (writeptr),Y
+	ENDIF
 
 	.no_erase
 	\\ Update star x position based on speed & wrap
@@ -821,7 +1234,9 @@ STARS_row0_addr = (MODE7_base_addr + ((0) * MODE7_char_width))
 
 	\\ Is there something there already?
 	LDA (writeptr), Y
+	IF ENABLE_ERASE_STARS
 	STA stars_table_byte,X
+	ENDIF
 	CMP #32
 	BNE skip_write
 
@@ -855,6 +1270,734 @@ STARS_row0_addr = (MODE7_base_addr + ((0) * MODE7_char_width))
 }
 
 \ ******************************************************************
+\ * IRQ
+\ ******************************************************************
+
+.irq_handler
+{
+	LDA &FC
+	PHA
+
+	\\ Which interrupt?
+	LDA &FE4D
+	AND #2
+	BEQ is_timer1
+
+	\\ Acknowledge vsync interrupt
+	IF ENABLE_TIMED_DRAW
+	STA &FE4D						; if we do this then *FX19 stops working!
+	ENDIF
+
+	\\ Set opposite buffers displayed & mapped
+	IF ENABLE_DOUBLE_BUFFER
+	LDA &FE34						; set bit X = 1 -> shadow RAM mapped
+	AND #&FA						; set bit X = 0 -> normal RAM mapped
+	ORA double_buffer				; set bit D = 1 -> shadow RAM displayed
+	STA &FE34						; set bit D = 0 -> normal RAM displayed
+	
+	\\ Flip buffers
+	LDA double_buffer
+	EOR #&5
+	STA double_buffer
+	ENDIF
+
+	\\ Set our draw timer
+	LDA #LO(DRAW_timer_ms):STA &FE44
+	LDA #HI(DRAW_timer_ms):STA &FE45
+
+	.is_timer1
+	LDA #&40:STA &FE4D
+	INC draw_signal
+
+	.return
+	\\ Exit
+	PLA
+	STA &FC
+	IF ENABLE_TIMED_DRAW
+	RTI
+	ELSE
+	JMP (old_irqv)
+	ENDIF
+}
+
+
+\ ******************************************************************
+\ * Scrolltext
+\ ******************************************************************
+
+.scrtext_init
+{
+	LDA #0
+	STA scrtext_col
+	STA scrtext_idx
+	STA scrtext_y_idx
+
+	.return
+	RTS
+}
+
+.scrtext_poll
+{
+	\\ For current message get sprite data
+	\\ For current column get sprite data column
+
+	\\ For x=0 to 71 (column in texels) step 2
+	\\ Get y for column
+	\\ Calculate writeptr
+
+	\\ Copy column of sprite data to screen
+
+	\\ Increment sprite data column
+	\\ If end of sprite data next char
+	\\ Get new sprite data
+
+	\\ First character column
+	LDA #PLOT_origin_col
+	STA plot_char_x
+
+	LDA scrtext_y_idx
+	STA scrtext_tmp_y
+
+	INC scrtext_y_idx
+	INC scrtext_y_idx
+	INC scrtext_y_idx
+	INC scrtext_y_idx
+	INC scrtext_y_idx
+	INC scrtext_y_idx
+
+	\\ Get message character index
+	LDY scrtext_idx
+	.try_again
+	STY scrtext_tmp_idx
+	LDX scrtext_message, Y
+	BNE not_eom
+
+	LDY #0
+	STY scrtext_idx
+	BEQ try_again
+	.not_eom
+
+	\\ Look up our font data
+	LDA font_table_LO, X
+	STA read_sprite_ptr + 1				; ** MODIFIES CODE
+	LDA font_table_HI, X
+	STA read_sprite_ptr + 2				; ** MODIFIES CODE
+
+	\\ Get index into our sprite data for column
+	LDA #0
+	STA scrtext_x_offset
+
+	\\ Index into our sprite table
+	LDX scrtext_col
+
+	.char_x_loop
+
+	\\ Get texel y for this column
+	LDY scrtext_tmp_y					; 3c
+	INY									; 2c
+	INY
+	INY
+	INY
+	STY scrtext_tmp_y					; 3c
+
+	LDA scrtext_y_table, Y				; 4c - could increment this address directly
+	TAY									; 2c
+
+	\\ Get y offset
+	LDA mod3_table, Y					; 4c
+;	CLC: ROR A: ROR A: ROR A			; now pre-shifted
+	ORA scrtext_x_offset				; 3c
+	STA scrtext_y_offset + 1			; 4c - ** MODIFIES CODE
+
+	\\ Get char y
+	LDA div3_table, Y					; 4c - could go straight from texel Y to screen address
+	TAY									; 2c
+
+	\\ Write address to screen
+	CLC									; 2c
+	LDA mode7_row_addr_LO, Y			; 4c
+	ADC plot_char_x						; 3c
+	STA writeptr						; 3c
+	LDA mode7_row_addr_HI, Y			; 4c
+	ADC #0								; 2c
+	STA writeptr+1						; 3c
+
+	\\ Copy a column of sprite data
+	LDA #0								; 2c
+
+	\\ Overhead per column = 54c
+	\\ Carry is clear here after 16-bit addition above
+
+	.col_loop
+	TAY									; 2c
+
+	\\ Get left column of sprite data
+	.read_sprite_ptr
+	LDA font0_data, X					; 4c
+
+	\\ Next sprite data byte
+	INX									; 2c
+
+	\\ Turn this into MODE 7 gfx code for left column
+	.scrtext_y_offset
+	ORA #&00							; where left_header = yy0 00000 - ** SELF-MODIFIED CODE
+	STA lookup_addr + 1					; 2c + 4c - ** MODIFIES CODE
+	.lookup_addr
+	LDA half_column_lookup				; 4c - ** SELF-MODIFIED CODE
+
+	\\ Write 3 pixels to screen
+	ORA (writeptr), Y					; 5c
+	STA (writeptr), Y					; 6c
+
+	\\ Next MODE 7 row
+	TYA									; 2c
+;	CLC									; we know carry is clear because carry is never touched
+	ADC #MODE7_char_width				; 2c
+
+	\\ Can probably use a lookup table here for Y indexed by X (0 - 96)
+
+	\\ Have we written 6 bytes?
+	CMP #(6 * MODE7_char_width)			; 2c
+	BCC col_loop						; 3c
+
+	\\ Cycle count 41c per sprite byte written = 41c * 6 = 246c
+	\\ Count now 38c..
+
+	.done_col_loop
+	\\ Have we written entire char?
+	CPX #(6 * 16)						; 2c 96 bytes for full font glyph
+	BCC cont_same_char					; 3c
+
+	\\ Next char
+	\\ Get message character index
+	INC scrtext_tmp_idx					; 5c
+	LDY scrtext_tmp_idx					; 3c
+	.next_char
+	LDX scrtext_message, Y				; 4c
+	CPX #0								; 2c
+	BNE not_zero						; 3c
+
+	LDY #0								; 2c
+	STY scrtext_tmp_idx					; 3c
+	JMP next_char						; 3c
+
+	.not_zero
+	\\ Look up our font data
+	LDA font_table_LO, X				; 4c
+	STA read_sprite_ptr + 1				; 4c
+	LDA font_table_HI, X				; 4c
+	STA read_sprite_ptr + 2				; 4c
+
+	\\ Get index into our sprite data for column
+	LDX #0								; 2c
+
+	\\ 43c overhead for a new character (happens 4x) = 172c
+
+	.cont_same_char
+	\\ Next column
+	LDA scrtext_x_offset				; 3c
+	EOR #&20							; 2c
+	STA scrtext_x_offset				; 3c
+
+	AND #&20							; 2c
+	BNE char_x_loop						; 3c
+
+	\\ Left side means new char
+	INC plot_char_x						; 5c
+
+	LDA plot_char_x						; 3c
+	CMP #MODE7_char_width				; 2c
+	BCC char_x_loop						; 3c
+
+	\\ 26c overhead for a new column + 54c from before the loop...
+	\\ One glyph draw = 16 * (26c + 54c + 246c) = 16 * 326c = 5216c + 43c for new character
+	\\ 72 columns = 4.5 glyphs = 72 * (26c + 54c + 246c) + 4 * 43c = 23472c + 172c = 23644c ~= 59% of frame :(
+
+	.done_screen
+	\\ Increment column for next time
+	CLC									; 2c
+	LDA scrtext_col						; 3c
+	ADC #6								; 2c
+
+	\\ Have we reached end of glyph?
+	CMP #(6 * 16)						; 2c
+	BCC return							; 3c
+
+	\\ Next char in message
+	INC scrtext_idx						; 5c
+
+	\\ Start of column
+	LDA #0								; 2c
+
+	.return
+	STA scrtext_col						; 3c
+	RTS
+}
+
+
+.scrtext_poll_whole
+{
+	\\ First character column
+	LDA #PLOT_origin_col
+	STA plot_char_x
+
+	LDA scrtext_y_idx
+	STA scrtext_tmp_y
+
+	\\ Get message character index
+	LDY scrtext_idx
+	.try_again
+	STY scrtext_tmp_idx
+	LDX scrtext_message, Y
+	BNE not_eom
+
+	LDY #0
+	STY scrtext_idx
+	BEQ try_again
+	.not_eom
+
+	\\ Look up our font data
+	LDA font_table_LO, X
+	STA read_sprite_ptr + 1				; ** MODIFIES CODE
+	LDA font_table_HI, X
+	STA read_sprite_ptr + 2				; ** MODIFIES CODE
+
+	\\ Get index into our sprite data for column
+
+	\\ Get texel y for this column
+	LDX scrtext_tmp_y
+	LDA whole_y_idx, X
+	TAY	
+	CLC
+	ADC #4
+	STA whole_y_idx, X
+
+	LDA scrtext_y_table, Y				; 4c - could increment this address directly
+	TAY									; 2c
+
+	\\ Get y offset
+	LDA mod3_table, Y					; 4c
+	STA scrtext_y_offset + 1			; 4c - ** MODIFIES CODE
+
+	\\ Get char y
+	LDA div3_table, Y					; 4c - could go straight from texel Y to screen address
+	TAY									; 2c
+
+	\\ Write address to screen
+	CLC									; 2c
+	LDA mode7_row_addr_LO, Y			; 4c
+	ADC plot_char_x						; 3c
+	STA writeptr						; 3c
+	LDA mode7_row_addr_HI, Y			; 4c
+	ADC #0								; 2c
+	STA writeptr+1						; 3c
+
+	\\ Index into our sprite table
+	LDX scrtext_col
+
+	.char_x_loop
+
+	\\ Copy a column of sprite data
+	LDA #0								; 2c
+
+	.col_loop
+	TAY									; 2c
+
+	\\ Get left column of sprite data
+	.read_sprite_ptr
+	LDA font0_data, X					; 4c
+
+	\\ Next sprite data byte
+	INX									; 2c
+
+	\\ Turn this into MODE 7 gfx code for left column
+	.scrtext_y_offset
+	ORA #&00							; where left_header = yy0 00000 - ** SELF-MODIFIED CODE
+	STA lookup_addr + 1					; 2c + 4c - ** MODIFIES CODE
+	.lookup_addr
+	LDA half_column_lookup				; 4c - ** SELF-MODIFIED CODE
+
+	\\ Write 3 pixels to screen
+	ORA (writeptr), Y					; 5c
+	STA (writeptr), Y					; 6c
+
+	\\ Next MODE 7 row
+	TYA									; 2c
+;	CLC									; we know carry is clear because carry is never touched
+	ADC #MODE7_char_width				; 2c
+
+	\\ Can probably use a lookup table here for Y indexed by X (0 - 96)
+
+	\\ Have we written 6 bytes?
+	CMP #(6 * MODE7_char_width)			; 2c
+	BCC col_loop						; 3c
+
+	\\ Cycle count 41c per sprite byte written = 41c * 6 = 246c
+	\\ Count now 38c..
+
+	.done_col_loop
+	\\ Have we written entire char?
+	CPX #(6 * 16)						; 2c 96 bytes for full font glyph
+	BCC cont_same_char					; 3c
+
+	\\ Next char
+	\\ Get message character index
+	INC scrtext_tmp_idx					; 5c
+	LDY scrtext_tmp_idx					; 3c
+	.next_char
+	LDX scrtext_message, Y				; 4c
+	CPX #0								; 2c
+	BNE not_zero						; 3c
+
+	LDY #0								; 2c
+	STY scrtext_tmp_idx					; 3c
+	BEQ next_char						; 3c
+
+	.not_zero
+	\\ Look up our font data
+	LDA font_table_LO, X				; 4c
+	STA read_sprite_ptr + 1				; 4c
+	LDA font_table_HI, X				; 4c
+	STA read_sprite_ptr + 2				; 4c
+
+	\\ Get texel y for this column
+	CLC
+	LDA scrtext_tmp_y
+	ADC #1
+	AND #&7
+	STA scrtext_tmp_y
+	TAX
+
+	LDA whole_y_idx, X
+	TAY	
+	CLC
+	ADC #4
+	STA whole_y_idx, X
+
+	LDA scrtext_y_table, Y				; 4c - could increment this address directly
+	TAY									; 2c
+
+	\\ Get y offset
+	LDA scrtext_y_offset + 1			; 4c
+	AND #&20
+	ORA mod3_table, Y					; 4c
+	STA scrtext_y_offset + 1			; 4c - ** MODIFIES CODE
+
+	\\ Get char y
+	LDA div3_table, Y					; 4c - could go straight from texel Y to screen address
+	TAY									; 2c
+
+	\\ Write address to screen
+	CLC									; 2c
+	LDA mode7_row_addr_LO, Y			; 4c
+	ADC plot_char_x						; 3c
+	STA writeptr						; 3c
+	LDA mode7_row_addr_HI, Y			; 4c
+	ADC #0								; 2c
+	STA writeptr+1						; 3c
+
+	\\ Get index into our sprite data for column
+	LDX #0								; 2c
+
+	.cont_same_char
+	\\ Next column
+	LDA scrtext_y_offset + 1
+	EOR #&20							; 2c
+	STA scrtext_y_offset + 1
+
+	AND #&20							; 2c
+	BNE jump_char_x_loop				; 3c
+
+	\\ Left side means new char
+	INC plot_char_x						; 5c
+
+	\\ New char means move writeptr
+	{
+		INC writeptr
+		BNE no_carry
+		INC writeptr+1
+		.no_carry
+	}
+
+	LDA plot_char_x						; 3c
+	CMP #MODE7_char_width				; 2c
+	BCS done_screen
+
+	.jump_char_x_loop
+	JMP char_x_loop
+
+	\\ 26c overhead for a new column + 54c from before the loop...
+	\\ One glyph draw = 16 * (26c + 54c + 246c) = 16 * 326c = 5216c + 43c for new character
+	\\ 72 columns = 4.5 glyphs = 72 * (26c + 54c + 246c) + 4 * 43c = 23472c + 172c = 23644c ~= 59% of frame :(
+
+	.done_screen
+	\\ Increment column for next time
+	CLC									; 2c
+	LDA scrtext_col						; 3c
+	ADC #6								; 2c
+
+	\\ Have we reached end of glyph?
+	CMP #(6 * 16)						; 2c
+	BCC return							; 3c
+
+	\\ Next char in message
+	INC scrtext_idx						; 5c
+
+	CLC
+	LDA scrtext_y_idx
+	ADC #1
+	AND #&7
+	STA scrtext_y_idx
+
+	\\ Start of column
+	LDA #0								; 2c
+
+	.return
+	STA scrtext_col						; 3c
+	RTS
+}
+
+
+\ ******************************************************************
+\ *	Fast small sprite plot - fixed 4x3 chars = 7x7 pixels
+\ * Coordinates plot_x, plot_y assume 4 char boundary
+\ * Call with X = plot_x, Y = plot_y
+\ * No clipping but safe to call outside of visible area
+\ * Probably fairly simple to adapt this to 8x6 chars = 15x16 pixels
+\ ******************************************************************
+
+.plot_fast_masked_8e
+{
+	\\ X coordinate to char
+;	LDA plot_x							;
+; Now passed in
+	TXA									; 2c
+	LSR A								; 2c
+
+	CMP #PLOT_origin_col				; 2c
+	BCS visible_left					; 2c
+
+	.not_visible
+	RTS
+
+	.visible_left
+	\\ If X char outside edge of screen then return
+	CMP #MODE7_char_width - 4			; 2c
+	BCS not_visible						; 2c
+
+	STA plot_char_x						; 3c
+
+	\\ Where are we reading data from?
+
+;	LDA plot_x							;
+; Now passed in
+	TXA									; 2c
+	AND #&1								; 2c x_offset
+	ORA mod3_table, Y					; 4c y_offset
+	LSR A								; 2c shift down
+	BCC no_x_offset						; 3c if x_offset falls into carry
+	ORA #&10							; 2c add it back (shifted down)
+	CLC									; 2c
+	.no_x_offset
+
+	\\ Could simplify this if assuming sprite data is page aligned
+
+	ADC plot_data_ptr					; 3c
+	STA sprite_data_addr + 1			; 4c
+	LDA plot_data_ptr+1					; 3c
+	ADC #0								; 2c
+	STA sprite_data_addr + 2			; 4c
+
+	\\ Can now claim X register as finished with plot_x
+
+	\\ Y coordinate to char
+; Now passed in
+;	LDY plot_y							; 3c
+	LDA div3_table, Y					; 4c
+
+	\\ If Y char outside edge of screen then return	
+	CMP #MODE7_char_height - 3			; 2c
+	BCS not_visible						; 2c
+
+	TAX									; 2c - plot_char_y
+
+	\\ Where are we writing to?
+	\\ Carry clear after addition above
+	LDA mode7_row_addr_LO, X			; 4c
+	ADC plot_char_x						; 3c
+	STA screen_load_addr + 1			; 4c
+	STA screen_write_addr + 1			; 4c
+	LDA mode7_row_addr_HI, X			; 4c
+	ADC #0								; 2c
+	STA screen_load_addr + 2			; 4c
+	STA screen_write_addr + 2			; 4c
+	
+	\\ Could simplify this if assuming sprite data is page aligned
+
+	\\ Mask data lies after sprite data
+	\\ Carry clear after addition above
+	LDA sprite_data_addr + 1			; 4c
+	ADC #96								; 2c
+	STA sprite_mask_addr + 1			; 4c
+	LDA sprite_data_addr + 2			; 4c
+	ADC #0								; 2c
+	STA sprite_mask_addr + 2			; 4c
+
+	LDY #0								; 2c
+	LDX #0								; 2c
+
+	\\ Setup overhead = 114c
+
+	\\ Write 12 bytes...
+	\\ 4 bytes per row x 3 rows
+
+	.loop
+	.screen_load_addr
+	LDA &7C00, X						; 4c
+	.sprite_mask_addr
+	AND ball_mask, Y					; 4c
+	.sprite_data_addr
+	ORA ball_data, Y					; 4c
+	.screen_write_addr
+	STA &7C00, X						; 5c
+
+	INY									; 2c
+	LDX fast_plot_index_8e, Y			; 4c
+	BPL loop							; 3c
+
+	\\ Total for write = 12 x 26c = 312c
+	\\ Overall = 114c + 312c = 426c
+
+	.return
+	RTS
+}
+
+.fast_plot_index_8e
+EQUB 0, 1, 2, 3, 40, 41, 42, 43, 80, 81, 82, 83, 255 
+
+
+\\ As above but fixed to 16x16 sprite = 8 characters x 6 rows
+
+.plot_fast_masked_16e
+{
+	\\ X coordinate to char
+	TXA									; 2c
+	LSR A								; 2c
+
+	CMP #PLOT_origin_col				; 2c
+	BCS visible_left					; 2c
+
+	.not_visible
+	RTS
+
+	.visible_left
+	\\ If X char outside edge of screen then return
+	CMP #MODE7_char_width - 8			; 2c
+	BCS not_visible						; 2c
+
+	STA plot_char_x						; 3c
+
+	\\ Where are we reading data from?
+
+	TXA									; 2c
+	AND #&1								; 2c x_offset
+	ORA mod3_table, Y					; 4c y_offset
+	LSR A								; 2c shift down
+	BCC no_x_offset						; 3c if x_offset falls into carry
+	ORA #&10							; 2c add it back (shifted down)
+	CLC									; 2c
+	.no_x_offset
+	LSR A: LSR A: LSR A:LSR A			; 8c shift down so is lookup - could simplify this
+
+	TAX									; 2c
+	LDA fast_plot_mult_48, X			; 4c lookup * 48
+
+	\\ Could simplify this if assuming sprite data is page aligned
+
+	ADC plot_data_ptr					; 3c
+	STA sprite_data_addr + 1			; 4c
+	LDA plot_data_ptr+1					; 3c
+	ADC #0								; 2c
+	STA sprite_data_addr + 2			; 4c
+
+	\\ Can now claim X register as finished with plot_x
+
+	\\ Y coordinate to char
+	LDY plot_y							; 3c
+	LDA div3_table, Y					; 4c
+
+	\\ If Y char outside edge of screen then return	
+	CMP #MODE7_char_height - 6			; 2c
+	BCS not_visible						; 2c
+
+	TAX									; 2c - plot_char_y
+
+	\\ Where are we writing to?
+	\\ Carry clear after addition above
+	LDA mode7_row_addr_LO, X			; 4c
+	ADC plot_char_x						; 3c
+	STA screen_load_addr + 1			; 4c
+	STA screen_write_addr + 1			; 4c
+	LDA mode7_row_addr_HI, X			; 4c
+	ADC #0								; 2c
+	STA screen_load_addr + 2			; 4c
+	STA screen_write_addr + 2			; 4c
+	
+	\\ Could simplify this if assuming sprite data is page aligned
+
+	\\ Mask data lies after sprite data
+	\\ Carry clear after addition above
+	LDA sprite_data_addr + 1			; 4c
+	ADC #LO(8 * 6 * 6)					; 2c
+	STA sprite_mask_addr + 1			; 4c
+	LDA sprite_data_addr + 2			; 4c
+	ADC #HI(8 * 6 * 6)					; 2c
+	STA sprite_mask_addr + 2			; 4c
+
+	LDY #0								; 2c
+	LDX #0								; 2c
+
+	\\ Setup overhead = 128c
+
+	\\ Write 48 bytes...
+	\\ 8 bytes per row x 6 rows
+
+	.loop
+	.screen_load_addr
+	LDA &7C00, X						; 4c
+	.sprite_mask_addr
+	AND ball_mask, Y					; 4c
+	.sprite_data_addr
+	ORA ball_data, Y					; 4c
+	.screen_write_addr
+	STA &7C00, X						; 5c
+
+	INY									; 2c
+	LDX fast_plot_index_16e, Y			; 4c
+	CPX #&FF							; 2c
+	BNE loop							; 3c
+
+	\\ Total for write = 48 x 28c = 1344c
+	\\ Overall = 128c + 1344c = 1472c
+
+	.return
+	RTS
+}
+
+.fast_plot_index_16e
+EQUB 0, 1, 2, 3, 4, 5, 6, 7
+EQUB 40, 41, 42, 43, 44, 45, 46, 47
+EQUB 80, 81, 82, 83, 84, 85, 86, 87
+EQUB 120, 121, 122, 123, 124, 125, 126, 127
+EQUB 160, 161, 162, 163, 164, 165, 166, 167
+EQUB 200, 201, 202, 203, 204, 205, 206, 207
+EQUB 255
+
+.fast_plot_mult_48
+EQUB 0, 48, 96, 144, 192, 240
+
+
+\ ******************************************************************
 \ *	Look up tables
 \ ******************************************************************
 
@@ -868,25 +2011,6 @@ FOR n, 0, MODE7_char_height-1, 1
 EQUB HI(MODE7_base_addr + n * MODE7_char_width)
 NEXT
 
-.mod3_table					; wasteful to have all 256 entries but safer for now
-FOR n, 0, 255, 1
-IF n < 128
-	EQUB (n MOD 3)
-ELSE
-	EQUB (3-((256-n) MOD 3)) MOD 3	; 255=-1 -> 2, 254=-2 -> 1, 253=-3 -> 0, 252=-4 -> 2 etc.
-ENDIF
-NEXT
-
-.div3_table					; wasteful to have all 256 entries but safer for now
-FOR n, 0, 255, 1
-	EQUB (n DIV 3)
-NEXT
-
-.raster_y_table				; don't need 256 entries but easier for now
-FOR n, 0, 255, 1
-	EQUB RASTER_centre_row + RASTER_wave_rows * SIN(PI * n / 128)
-NEXT
-
 .stars_table_x
 FOR n, 0, STARS_num, 1
 	EQUB RND(MODE7_texel_width * 2)
@@ -897,12 +2021,98 @@ FOR n, 0, STARS_num, 1
 	EQUB 1+RND(3)
 NEXT
 
+ALIGN &100
+.mod3_table					; wasteful to have all 256 entries but safer for now
+FOR n, 0, 255, 1
+	EQUB (n MOD 3) * 64		; shift this up to top two bits to avoid shifting for use in lookup table
+NEXT
+
+ALIGN &100
+.div3_table					; wasteful to have all 256 entries but safer for now
+FOR n, 0, 255, 1
+	EQUB (n DIV 3)
+NEXT
+
+ALIGN &100
+.half_column_lookup
+FOR n, 0, 192, 1
+	a = n AND 1
+	b = (n AND 2) / 2
+	c = (n AND 4) / 4
+	d = (n AND 8) / 8
+	e = (n AND 16) / 16
+
+	x = (n AND 32) / 32
+	yy = (n AND 192) / 64
+
+	IF x = 0
+
+		IF yy = 0
+			EQUB 32 + a * 16 + b * 4 + c * 1
+		ELIF yy = 1
+			EQUB 32 + b * 16 + c * 4 + d * 1
+		ELSE
+			EQUB 32 + c * 16 + d * 4 + e * 1
+		ENDIF
+
+	ELSE
+
+		IF yy = 0
+			EQUB 32 + a * 64 + b * 8 + c * 2
+		ELIF yy = 1
+			EQUB 32 + b * 64 + c * 8 + d * 2
+		ELSE
+			EQUB 32 + c * 64 + d * 8 + e * 2
+		ENDIF
+
+	ENDIF
+NEXT
+
+.raster_y_table				; don't need 256 entries but easier for now
+FOR n, 0, 255, 1
+	EQUB RASTER_centre_row + RASTER_wave_rows * SIN(PI * n / 128)
+NEXT
+
+.scrtext_y_table			; don't need 256 entries but easier for now
+FOR n, 0, 255, 1
+	EQUB 40 + 10 * SIN(PI * n / 128)
+NEXT
+
+.scrtext_message
+
+	MAPCHAR '!', 1
+	MAPCHAR ',', 12
+	MAPCHAR '-', 13
+	MAPCHAR '.', 14
+	MAPCHAR '0','9',16
+	MAPCHAR '?', 31
+	MAPCHAR ' ', 32
+	MAPCHAR 'A','Z',33
+	MAPCHAR 'a','z',33
+
+EQUS "HELLO WORLD! THIS IS A MESSAGE... 0123456789?-,.   "
+EQUB 0
+
+.whole_y_idx
+EQUB 0, 32, 64, 96, 160, 160, 192, 224
+
 
 \ ******************************************************************
 \ *	Included data
 \ ******************************************************************
 
-INCLUDE "starhole.6502"
+ALIGN &100
+INCLUDE "font2.6502"
+
+ALIGN &100
+INCLUDE "ball.6502"
+
+ALIGN &100
+INCLUDE "ball15.6502"
+
+ALIGN &100
+INCLUDE "ball15e.6502"
+
 
 \ ******************************************************************
 \ *	End address to be saved
@@ -915,10 +2125,20 @@ INCLUDE "starhole.6502"
 \ *	Space reserved for runtime buffers not preinitialised
 \ ******************************************************************
 
+IF ENABLE_ERASE_STARS
 .stars_table_byte
 SKIP STARS_num
+ENDIF
 
-ALIGN &100
+\\ Teletext screen = bg col + black/new bg + fx + fg col
+.teletext_bg_col
+SKIP MODE7_char_height
+
+.teletext_fg_col
+SKIP MODE7_char_height
+
+.teletext_fx
+SKIP MODE7_char_height
 
 \ ******************************************************************
 \ *	Save the code
