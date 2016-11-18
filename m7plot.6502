@@ -1923,7 +1923,7 @@ EQUB 0, 1, 2, 3, 40, 41, 42, 43, 80, 81, 82, 83, 255
 	\\ Can now claim X register as finished with plot_x
 
 	\\ Y coordinate to char
-	LDY plot_y							; 3c
+;	LDY plot_y							; 3c
 	LDA div3_table, Y					; 4c
 
 	\\ If Y char outside edge of screen then return	
