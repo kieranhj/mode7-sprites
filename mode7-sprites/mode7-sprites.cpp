@@ -73,6 +73,53 @@ unsigned char get_mask_char_from_image(int x7, int y7, int x_offset, int y_offse
 	return mask ^ 0xff;
 }
 
+void make_pixel_code(FILE *outfile, const char *label, int char_width, int char_height)
+{
+	int count = 0;
+
+	fprintf(outfile, ".%s_data\n", label);
+
+	int prev = 0;
+
+	for (int y7 = 0; y7 < char_height; y7++)
+	{
+		for (int x7 = 0; x7 < char_width; x7++)
+		{
+			unsigned char gfx_char = get_graphic_char_from_image(x7, y7, 0, 0);
+
+			if( gfx_char != 32 )
+			{
+				int screen_address = y7 * 40 + x7;
+
+#if 0
+				int screen_bits = ((gfx_char & 31) | ((gfx_char & 64) >> 1));		// mask out bit 5, shift down bit 6
+
+				int packed = (screen_bits << 10) | (screen_address - prev);			// video encoder uses delta from prev screen address
+
+				fprintf(outfile, "EQUB &%02x, &%02x\t; x7=%d,y7=%d,addr=%04x,delta=%04x,bits=%d\n", (packed % 256), (packed / 256), x7, y7, screen_address, (screen_address - prev), screen_bits);
+#else
+				int delta = (screen_address - prev);
+
+				while (delta > 255)
+				{
+					fprintf(outfile, "EQUB &%02x, &%02x\t; x7=%d,y7=%d,addr=%04x,delta=%04x\n", 255, 0, x7, y7, screen_address, delta);
+					delta -= 255;
+					count++;
+				}
+
+				fprintf(outfile, "EQUB &%02x, &%02x\t; x7=%d,y7=%d,addr=%04x,delta=%04x,gfx=%d\n", delta, gfx_char, x7, y7, screen_address, (screen_address - prev), gfx_char);
+#endif
+
+				prev = screen_address;
+				count++;
+			}
+		}
+	}
+
+	fprintf(outfile, ".%s_count\nEQUB %d\t; number packed chars\n", label, count);
+
+}
+
 void make_sprite_data(FILE *outfile, const char *label, int pixel_width, int pixel_height, bool swizzle, bool mask)
 {
 	fprintf(outfile, ".%s_data\n", label);
@@ -288,6 +335,7 @@ int main(int argc, char **argv)
 	const int num_glyphs = cimg_option("-n", 0, "Num glyphs / sprites to extract (0=all)");
 	const bool swizzle = cimg_option("-swizzle", false, "Output data in column order (default=row order)");
 	const bool six = cimg_option("-six", false, "Generate six pre-shifted offsets as sprite data");
+	const bool code = cimg_option("-code", false, "Generate video encoder data");
 	const int align = cimg_option("-align", 0, "Align sprite data blocks");
 
 	if (cimg_option("-h", false, 0)) std::exit(0);
@@ -303,7 +351,18 @@ int main(int argc, char **argv)
 		std::exit(0);
 	}
 
-	src.assign(input_name);
+	CImg<unsigned char> img(108, 99, 1, 3, 0);
+	unsigned char color[] = { 255, 255, 255 };
+
+	for (int r = 0; r < 100; r += 4)
+	{
+		img.draw_circle(54, 47.5, r, color, 1.0f, 0xffffffff);
+	}
+	img.save(input_name);
+
+	src.assign(img);
+
+
 
 	printf("Image=%d x %d\n", src._width, src._height);
 
@@ -335,26 +394,32 @@ int main(int argc, char **argv)
 	fprintf(outfile, "\\\\ Image size=%dx%d pixels=%dx%d\n", src._width, src._height, pixel_width, pixel_height);
 	fprintf(outfile, ".%s\n", label);
 
-	if (six)
+	if (code)
 	{
-		fprintf(outfile, "EQUB %d, %d\t;char width, char height\n", char_width, char_height);
-
-		if (align)
-		{
-			fprintf(outfile, "ALIGN %d\n", align);
-		}
 	}
 	else
 	{
-		fprintf(outfile, "\\\\ Data in %s order\n", swizzle ? "COLUMN" : "ROW");
-
-		if (swizzle)
+		if (six)
 		{
-			fprintf(outfile, "EQUB %d, %d\t;char height, pixel width\n", char_height, pixel_width);
+			fprintf(outfile, "EQUB %d, %d\t;char width, char height\n", char_width, char_height);
+
+			if (align)
+			{
+				fprintf(outfile, "ALIGN %d\n", align);
+			}
 		}
 		else
 		{
-			fprintf(outfile, "EQUB %d, %d\t;pixel width, char height\n", pixel_width, char_height);
+			fprintf(outfile, "\\\\ Data in %s order\n", swizzle ? "COLUMN" : "ROW");
+
+			if (swizzle)
+			{
+				fprintf(outfile, "EQUB %d, %d\t;char height, pixel width\n", char_height, pixel_width);
+			}
+			else
+			{
+				fprintf(outfile, "EQUB %d, %d\t;pixel width, char height\n", pixel_width, char_height);
+			}
 		}
 	}
 
@@ -397,13 +462,20 @@ int main(int argc, char **argv)
 	}
 	else
 	{
-		if (six)
+		if (code)
 		{
-			make_six_data(outfile, label, char_width, char_height, align, mask);
+			make_pixel_code(outfile, label, pixel_width, pixel_height);
 		}
 		else
 		{
-			make_sprite_data(outfile, label, pixel_width, pixel_height, swizzle, mask);
+			if (six)
+			{
+				make_six_data(outfile, label, char_width, char_height, align, mask);
+			}
+			else
+			{
+				make_sprite_data(outfile, label, pixel_width, pixel_height, swizzle, mask);
+			}
 		}
 	}
 
