@@ -27,3 +27,22 @@
 
 
 w-(x+w-screen)=screen-x
+
+
+Offer Ruairi this as an invitro for Sundown?
+They could potentially take it to Revision?!
+
+Flow:
+0.ARDtext header searching for page# for each section
+1. Bitshifters logo
+2. crtc logo
+3. "Invite you to..."
+4. Sundown logo
+5. stars come in, floor comes in
+5. Scrolling message w/ nice music
+6. (Option) Some bouncing balls
+7. (Option) Wibbling logo?
+8. (Option) Improve/remove raster bars but introduce some colour
+9. Number of pages containing info about the party - date, address, details etc.
+10. Greets page
+

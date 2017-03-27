@@ -35,7 +35,7 @@ BNE_OP = &D0
 ENABLE_ERASE_STARS = TRUE
 ENABLE_DOUBLE_BUFFER = FALSE
 ENABLE_CLEAR_SCREEN = TRUE
-ENABLE_KEY_SPRITE = TRUE
+ENABLE_KEY_SPRITE = FALSE
 ENABLE_TIMED_DRAW = TRUE
 ENABLE_SEPARATED_RASTERS = FALSE
 
@@ -232,8 +232,8 @@ GUARD &7C00							; ensure code size doesn't hit start of screen memory
 	JSR mode7_erase_screen
 	ENDIF
 
-	;JSR scrtext_poll
-	JSR scrtext_poll_whole
+	JSR scrtext_poll
+	;JSR scrtext_poll_whole
 
 	\\ Check for keys
 	IF ENABLE_KEY_SPRITE

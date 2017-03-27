@@ -1,1 +1,1 @@
-"..\..\Tools\B-emV2.2Win\B-em.exe" m7plot.ssd
+"..\..\bin\B-em\B-em.exe" m7plot.ssd

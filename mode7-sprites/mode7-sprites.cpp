@@ -274,6 +274,138 @@ void make_six_data(FILE *outfile, const char *label, int char_width, int char_he
 	}
 }
 
+void make_horiz_data(FILE *outfile, const char *label, int char_width, int char_height, int align, bool mask)
+{
+#if 0
+	if (!align)
+	{
+		fprintf(outfile, ".%s_table\n", label);
+
+		fprintf(outfile, ".%s_table_LO\n", label);
+		for (int y_offset = 0; y_offset < 3; y_offset++)
+		{
+			for (int x_offset = 0; x_offset < 2; x_offset++)
+			{
+				fprintf(outfile, "EQUB LO(%s_data_%d%d)\n", label, x_offset, y_offset);
+			}
+		}
+		fprintf(outfile, ".%s_table_HI\n", label);
+		for (int y_offset = 0; y_offset < 3; y_offset++)
+		{
+			for (int x_offset = 0; x_offset < 2; x_offset++)
+			{
+				fprintf(outfile, "EQUB HI(%s_data_%d%d)\n", label, x_offset, y_offset);
+			}
+		}
+		fprintf(outfile, "\\\\ Corresponding mask data is %d bytes following sprite data\n", char_width * char_height * 6);
+	}
+#endif
+
+	fprintf(outfile, ".%s_data\n", label);
+
+	for (int y_row = 0; y_row < 3; y_row++)
+	{
+		for (int x_offset = 0; x_offset < 2; x_offset++)
+		{
+			fprintf(outfile, ".%s_data_%d%d\t; x_offset=%d, y_row=%d\n", label, x_offset, y_row, x_offset, y_row);
+
+			for (int y7 = 0; y7 < char_height; y7++)
+			{
+				fprintf(outfile, "EQUB ");
+				for (int x7 = 0; x7 < char_width; x7++)
+				{
+					if (x7 != 0)
+					{
+						fprintf(outfile, ",");
+					}
+
+					unsigned char gfx = get_graphic_char_from_image(x7, y7, x_offset, 0);
+
+					switch (y_row)
+					{
+					case 0:
+						gfx &= (1 | 2);
+						break;
+
+					case 1:
+						gfx &= (4 | 8);
+						break;
+
+					case 2:
+						gfx &= (16 | 64);
+						break;
+
+					default:
+						break;
+					}
+
+					fprintf(outfile, "%d", gfx);
+				}
+				fprintf(outfile, "\n");
+			}
+
+			if (align)
+			{
+				fprintf(outfile, "ALIGN %d\n", align);
+			}
+		}
+	}
+
+	if (mask)
+	{
+		fprintf(outfile, ".%s_mask\n", label);
+
+		for (int y_row = 0; y_row < 3; y_row++)
+		{
+			for (int x_offset = 0; x_offset < 2; x_offset++)
+			{
+				fprintf(outfile, ".%s_mask_%d%d\t; x_offset=%d, y_row=%d\n", label, x_offset, y_row, x_offset, y_row);
+
+				for (int y7 = 0; y7 < char_height; y7++)
+				{
+					fprintf(outfile, "EQUB ");
+					for (int x7 = 0; x7 < char_width; x7++)
+					{
+						if (x7 != 0)
+						{
+							fprintf(outfile, ",");
+						}
+
+						unsigned char gfx = get_mask_char_from_image(x7, y7, x_offset, 0);
+
+						switch (y_row)
+						{
+						case 0:
+							gfx &= (1 | 2);
+							break;
+
+						case 1:
+							gfx &= (4 | 8);
+							break;
+
+						case 2:
+							gfx &= (16 | 64);
+							break;
+
+						default:
+							break;
+						}
+
+						fprintf(outfile, "%d", gfx);
+					}
+
+					fprintf(outfile, "\n");
+				}
+
+				if (align)
+				{
+					fprintf(outfile, "ALIGN %d\n", align);
+				}
+			}
+		}
+	}
+}
+
 
 int main(int argc, char **argv)
 {
@@ -288,6 +420,7 @@ int main(int argc, char **argv)
 	const int num_glyphs = cimg_option("-n", 0, "Num glyphs / sprites to extract (0=all)");
 	const bool swizzle = cimg_option("-swizzle", false, "Output data in column order (default=row order)");
 	const bool six = cimg_option("-six", false, "Generate six pre-shifted offsets as sprite data");
+	const bool horiz = cimg_option("-horiz", false, "Generate horizontal strips as sprite data");
 	const int align = cimg_option("-align", 0, "Align sprite data blocks");
 
 	if (cimg_option("-h", false, 0)) std::exit(0);
@@ -400,6 +533,10 @@ int main(int argc, char **argv)
 		if (six)
 		{
 			make_six_data(outfile, label, char_width, char_height, align, mask);
+		}
+		else if (horiz)
+		{
+			make_horiz_data(outfile, label, char_width, char_height, align, mask);
 		}
 		else
 		{
