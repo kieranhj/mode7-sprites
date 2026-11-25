@@ -18,7 +18,7 @@ MODE 7 (Teletext graphics) sprite converter (Windows C++ tool) and 6502 plot rou
 ## Build and run
 - `make`: runs `make.bat`, which assembles `m7plot.6502` with `..\..\Bin\beebasm.exe` into `m7plot.ssd`. `make help` lists targets.
 - Output `m7plot.ssd` is tracked, so a rebuild shows it as modified.
-- `run.bat` points at `..\..\Tools\B-emV2.2Win\B-em.exe`, which no longer exists on D: (other repos use `..\..\bin\B-em\B-em.exe`).
+- `run.bat` was deleted on 2026-11-25 (it pointed at a B-Em path that no longer exists). To run: `..\..\bin\b-em\b-em.exe m7plot.ssd`.
 - The converter is a Visual Studio project; not rebuilt here.
 
 ## Local changes
