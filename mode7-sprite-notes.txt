@@ -1,0 +1,101 @@
+- Write plot routine in 6502
+  What is the coordinate system - is (0,0) top left or bottom left?
+ 
+- Including screen clipping - gah!
+  Top & bottom clip doesn't matter so much - can have spare buffer memory before and after is ROM
+  (Even if using RAM for music can buffer this carefully, 1k max)
+
+  Left clip: if x<0 then width+=x sprite_offset-=x x=0 check w>0
+  Right clip: if x+w>=screen then w=screen-x x can't be>screen
+  ARE YOU CLIPPING IN PIXEL COORDINATES OR CHARACTER COORDINATES?!
+
+- Test can draw at pixel accuracy and masking works etc.
+- Add code generation rather than data tables
+- Compare size of code vs data tables
+  (Some optimisations could be had here, e.g. using INY until need to increment ptr address)
+- Add ability to chop up sprite sheet (Font)
+- Add scaling to sprite generation? (Depends on demo effect)
+- Add rotation to sprite generation? (Depends on demo effect)
+- Get a nice 32x32 font going and scrolltext
+- Framework for MODE 7 demo with music from start
+
+
+- Generate code to do reflections and test
+- Generate code to wibble lines and test
+- Star field
+- Colour raster bars
+
+Vertical Striped Sprite Data (aka v3)
+Better solution to 6x copies problem?
+Store 2x copies (for odd & even offset)
+But store data in vertical stripes, so one character width of data in correct arrangement per byte
+Then just need to map consecutive sequences of 6-bits from byte data to draw each character in a column
+3x bytes = 4x characters, can unroll this loop but only max 2x reads per character written to screen and
+less bit-twiddling.
+
+bitstream  : AAAAAAAA|BBBBBBBB|CCCCCCCC|
+y_offset=0 : aaaaaa|aabbbb|bbbbcc|cccccc
+y_offset=1 : 00aaaa|aaaabb|bbbbbb|cccccc|ccdddd
+y_offset=2 : 0000aa|aaaaaa|bbbbbb|bbcccc|ccccdd
+
+Half-char y_offset data (aka v4)
+
+Sprite data w x h pixels
+Each byte stores 5 bits that correspond to 3x vertical pixels in 3x combinations in one half of a character
+cell.  Use 32 entry look up tables to select correct gfx character data according to x & y offset
+
+Pixels in top left:
+a b | g h
+c d | i j
+e f | k l
+----+----
+m n |
+o p |
+q r |
+----+
+
+Byte data store bit triple sequences.  Use character (0,1) as example:
+
+Possible bit sequences for left-hand column according to y offset:
+(0) m o q  (1) e m o  (2) c e m 
+So store bit sequence: c e m o q as one byte: 000cemoq
+Right hand column therefore: d f n p q      : 000dfnpr
+
+Use top three bits to index into lookup table: yy = y offset, x = x offset
+Which turns bit sequence into MODE 7 gfx char, x bit selects left or right half of gfx char
+
+E.g. lookup index: yyxcemoq
+If yy=00 then index is 00moq (others ZZmoq are not valid entries - duplicate in table)
+If yy=01 then index is 0emo0 (others ZemoZ are not valid entries - duplicate in table)
+If yy=10 then index is cem00 (others cemZZ are not valid entries - duplicate in table)
+If yy=11 this is not valid
+
+Require 6x 32 byte lookups = 192 bytes to turn one byte into left/right hand pixels at 0-2 y offset
+Every character written reequires two reads of sprite data (left & right hand pixels), a lookup
+for each and then OR together.
+
+LDA sprite_data,X
+ORA left_header         ; where left_header = yy0 00000
+TAY
+LDA lookup,Y
+STA byte
+INX
+LDA sprite_data,X
+ORA right_header        ; where right_header = yy1 00000
+TAY
+LDA lookup,Y
+ORA byte                ; mask in other half
+STA screen_ptr          ; write to screen
+
+Size of data = 1x byte per pixel width x character height
+E.g. 32 x 32 = 32 x 11 = 352 bytes for all 6x offsets
+x42 glyphs = 14784 ~= 14.5k
+
+Say top left corner of screen is (64, 64)?
+72x75
+Ended up saying centre of screen is 128, 129
+
+
+Fast as possible 7x7 sprite draw = 4 x 3 characters pre-shifted
+Align to 16 byte boundaries then can use same header format (but shifted down one) to set index
+Also can use one register for index to screen write
